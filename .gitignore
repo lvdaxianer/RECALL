@@ -1,0 +1,12 @@
+.claude
+.venv
+.git
+.specify
+specs
+*.pyc
+__pycache__
+logs
+.idea
+.env
+docs
+.pytest*

@@ -1,0 +1,50 @@
+# Elasticsearch 同义词配置文件
+#
+# 格式：每行一个同义词组，逗号分隔
+# 例如：pinia,store,vuex,状态管理
+#
+# 注意：ES 会自动处理双向同义词（a,b,c 表示 a=b=c）
+#
+# @author lvdaxianerplus
+# @date 2026-04-16
+
+# 状态管理
+pinia,store,vuex,状态管理
+vuex,pinia,store
+redux,mobx,状态管理
+
+# Vue 相关
+vue,vuejs,vue3,Vue.js
+vite,vitejs
+nuxt,nuxtjs
+
+# React 相关
+react,reactjs,react.js
+next,nextjs
+redux,react-redux
+
+# API 相关
+api,接口,rest,restful
+swagger,openapi
+graphql
+
+# 前端框架
+typescript,ts
+javascript,js,ecmascript
+css,样式,stylesheet
+html,markup,模板
+
+# 测试相关
+jest,测试,unittest
+cypress,e2e,端到端测试
+vitest
+
+# 构建工具
+webpack,vite
+rollup,esbuild
+babel,转译
+
+# 全栈框架
+nextjs,next
+nuxtjs,nuxt
+nestjs,nest

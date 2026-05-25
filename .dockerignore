@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试
+.coverage
+htmlcov/
+.pytest_cache/
+tests/
+
+# 文档
+docs/
+*.md
+!requirements.txt
+
+# 日志
+logs/
+*.log
+
+# 其他
+.DS_Store
+Thumbs.db
