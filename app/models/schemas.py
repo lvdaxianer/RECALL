@@ -7,7 +7,7 @@ Pydantic 数据模型
 @date 2026-04-14
 """
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict, Literal
 from pydantic import BaseModel, Field
 
 
@@ -54,6 +54,11 @@ class SearchRequest(BaseModel):
     topK: Optional[int] = Field(20, description="返回数量，默认 20", ge=1, le=1000)
     threshold: Optional[float] = Field(None, description="相似度阈值，默认使用配置值", ge=0.0, le=1.0)
     enableFeatureBoost: Optional[bool] = Field(False, description="是否启用特征加权")
+    query_scope: Optional[Literal["local", "global", "hybrid"]] = Field(None, description="查询范围识别结果")
+    route_plan: List[str] = Field(default_factory=list, description="检索路由计划摘要")
+    issue_type: Optional[str] = Field(None, description="问题类型")
+    issue_route: Dict[str, Any] = Field(default_factory=dict, description="问题类型路由结果")
+    issue_filters: Dict[str, Any] = Field(default_factory=dict, description="问题类型过滤条件")
 
 
 # =============================================================================
@@ -88,6 +93,12 @@ class SearchResult(BaseModel):
     description: str = Field(..., description="原始描述文本")
     score: float = Field(..., description="Rerank 分数")
     features: Optional[dict] = Field(None, description="特征标签，包含 category 和 tags")
+    score_trace: Optional[dict] = Field(None, description="候选级检索分数追踪")
+
+
+class RecommendationResult(SearchResult):
+    """推荐结果项"""
+    reason: str = Field("", description="推荐原因")
 
 
 class SearchResponse(BaseModel):
@@ -95,6 +106,60 @@ class SearchResponse(BaseModel):
     code: int = Field(200, description="状态码")
     message: str = Field("success", description="状态消息")
     data: List[SearchResult] = Field(default_factory=list, description="结果列表")
+
+
+class OptimizeSearchRequest(BaseModel):
+    """语义优化检索请求模型"""
+    input: str = Field(..., description="原始用户查询", min_length=1)
+    type: Optional[str] = Field("all", description="资源类型，默认 all")
+    topK: Optional[int] = Field(20, description="返回数量，默认 20", ge=1, le=1000)
+    threshold: Optional[float] = Field(None, description="相似度阈值", ge=0.0, le=1.0)
+    enableFeatureBoost: Optional[bool] = Field(False, description="是否启用特征加权")
+
+
+class OptimizeSearchData(BaseModel):
+    """语义优化检索响应数据模型"""
+    request_id: str = Field(..., description="本次优化检索请求 ID，可用于撤销该请求关联的 Rerank 缓存")
+    original_query: str = Field(..., description="原始查询")
+    optimized_query: str = Field(..., description="优化后查询")
+    intent: Optional[str] = Field(None, description="识别出的查询意图")
+    query_scope: Optional[Literal["local", "global", "hybrid"]] = Field(None, description="查询范围识别结果")
+    route_plan: Dict[str, Any] = Field(default_factory=dict, description="检索路由计划摘要")
+    issue_type: Optional[str] = Field(None, description="问题类型")
+    issue_route: Dict[str, Any] = Field(default_factory=dict, description="问题类型路由结果")
+    issue_filters: Dict[str, Any] = Field(default_factory=dict, description="问题类型过滤条件")
+    cot_plan: List[str] = Field(default_factory=list, description="CoT 风格的可解释检索计划摘要")
+    expanded_queries: List[str] = Field(default_factory=list, description="扩展查询列表")
+    see_trace: List[dict] = Field(default_factory=list, description="SEE 可视化查询过程追踪")
+    original_results: List[SearchResult] = Field(default_factory=list, description="原始查询结果")
+    optimized_results: List[SearchResult] = Field(default_factory=list, description="优化后查询结果")
+    recommendations: List[RecommendationResult] = Field(default_factory=list, description="相关推荐结果")
+    comparison: dict = Field(default_factory=dict, description="两次检索对比")
+    fallback_used: bool = Field(False, description="是否使用降级结果")
+
+
+class OptimizeSearchResponse(BaseModel):
+    """语义优化检索响应模型"""
+    code: int = Field(200, description="状态码")
+    message: str = Field("success", description="状态消息")
+    data: OptimizeSearchData = Field(..., description="优化检索数据")
+
+
+class EvaluationRecordRequest(BaseModel):
+    """检索评测记录请求模型"""
+    query: str = Field(..., description="原始查询", min_length=1)
+    optimized_query: Optional[str] = Field(None, description="优化后的查询")
+    retrieved_ids: List[str] = Field(default_factory=list, description="检索返回的业务 ID 列表")
+    miss_reason: Literal[
+        "intent_error",
+        "recall_miss",
+        "rerank_error",
+        "generation_error",
+        "stale_knowledge",
+        "unknown"
+    ] = Field("unknown", description="未命中或效果差原因")
+    human_label: Optional[str] = Field(None, description="人工评测标签")
+    request_id: Optional[str] = Field(None, description="关联优化检索 request_id")
 
 
 class DeleteResponse(BaseModel):

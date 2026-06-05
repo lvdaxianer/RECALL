@@ -8,7 +8,8 @@
 """
 
 import json
-from typing import Dict, Any, Optional
+import asyncio
+from typing import Dict, Any, Optional, List
 from app.services.llm_service import LLMService, get_llm_service
 from app.utils.logger import get_logger
 
@@ -114,6 +115,23 @@ class FeatureExtractService:
             feature_extract_logger.error("[特征提取] 提取失败: {}", str(e))
             return self._get_default_features()
 
+    async def extract_features_batch(self, descriptions: List[str], concurrency: int = 10) -> List[Dict[str, Any]]:
+        """
+        批量提取特征
+
+        @param descriptions - 描述文本列表
+        @param concurrency - 最大并发数
+        @returns 特征列表，顺序与输入一致
+        """
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_one(description: str) -> Dict[str, Any]:
+            """在并发窗口内提取单条特征"""
+            async with semaphore:
+                return await self.extract_features(description)
+
+        return await asyncio.gather(*(run_one(description) for description in descriptions))
+
     def _parse_llm_response(self, response: str) -> Optional[Dict[str, Any]]:
         """
         解析 LLM 响应
@@ -181,7 +199,9 @@ class FeatureExtractService:
         """
         return {
             "category": "未分类",
-            "tags": []
+            "tags": [],
+            "entities": [],
+            "relations": []
         }
 
     async def health_check(self) -> bool:

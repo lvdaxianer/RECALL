@@ -8,8 +8,7 @@
 """
 
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 
 # =============================================================================
@@ -66,6 +65,8 @@ class TestFeatureExtract:
 
         assert result["category"] == "未分类"
         assert result["tags"] == []
+        assert result["entities"] == []
+        assert result["relations"] == []
 
     @pytest.mark.asyncio
     async def test_extract_features_llm_error(self, feature_extract_service, mock_llm_service):
@@ -80,6 +81,8 @@ class TestFeatureExtract:
 
         assert result["category"] == "未分类"
         assert result["tags"] == []
+        assert result["entities"] == []
+        assert result["relations"] == []
 
     @pytest.mark.asyncio
     async def test_extract_features_invalid_json(self, feature_extract_service, mock_llm_service):
@@ -94,6 +97,8 @@ class TestFeatureExtract:
 
         assert result["category"] == "未分类"
         assert result["tags"] == []
+        assert result["entities"] == []
+        assert result["relations"] == []
 
     @pytest.mark.asyncio
     async def test_extract_features_tags_limit(self, feature_extract_service, mock_llm_service):
@@ -150,6 +155,26 @@ class TestFeatureExtract:
         result = await feature_extract_service.health_check()
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_extract_features_batch_preserves_order(self, feature_extract_service):
+        """
+        场景：批量提取特征
+
+        预期：结果顺序与输入描述顺序一致
+        """
+        async def fake_extract(description):
+            return {"category": "测试", "tags": [description]}
+
+        feature_extract_service.extract_features = AsyncMock(side_effect=fake_extract)
+
+        result = await feature_extract_service.extract_features_batch(["a", "b", "c"], concurrency=2)
+
+        assert result == [
+            {"category": "测试", "tags": ["a"]},
+            {"category": "测试", "tags": ["b"]},
+            {"category": "测试", "tags": ["c"]}
+        ]
 
 
 # =============================================================================

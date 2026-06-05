@@ -269,6 +269,19 @@ class TestBoost:
         assert "_fixed_boost" in result[0]
         assert "_semantic_boost" not in result[0]
 
+    def test_feature_boost_prefers_query_matching_tags(self, feature_boost_service):
+        """本地 tag rank feature 应该优先抬高命中查询词的候选"""
+        results = [
+            {"id": "doc-a", "score": 0.5, "features": {"tags": ["小程序", "白屏"]}},
+            {"id": "doc-b", "score": 0.5, "features": {"tags": ["门禁", "梯控"]}},
+        ]
+
+        boosted = feature_boost_service.apply_local_tag_rank_feature("小程序上线后白屏", results)
+
+        assert boosted[0]["id"] == "doc-a"
+        assert boosted[0]["score"] > boosted[1]["score"]
+        assert boosted[0]["score_trace"]["tag_rank_feature"] > 0
+
     @pytest.mark.asyncio
     async def test_boost_empty_results(self, feature_boost_service):
         """

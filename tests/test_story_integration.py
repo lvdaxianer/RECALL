@@ -19,7 +19,8 @@ RAG 语义检索故事线集成测试
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import AsyncClient
+import os
 import random
 import string
 
@@ -29,6 +30,14 @@ import string
 # =============================================================================
 
 BASE_URL = "http://localhost:8000"
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.getenv("RUN_STORY_INTEGRATION_TESTS") != "true",
+        reason="需要真实 localhost:8000、DashScope 和 Milvus 服务，默认跳过"
+    )
+]
 
 
 def generate_id(prefix: str = "") -> str:

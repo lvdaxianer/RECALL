@@ -8,9 +8,21 @@ ES Service 模块
 """
 
 from typing import List, Dict, Any, Optional
-from elasticsearch import Elasticsearch
-from elasticsearch.exceptions import ConnectionError as ESConnectionError, NotFoundError
+import httpx
+from elasticsearch import Elasticsearch, helpers
+from elasticsearch.exceptions import (
+    ConnectionError as ESConnectionError,
+    NotFoundError,
+    UnsupportedProductError
+)
 from app.config import Config
+from app.services.es_http_compat_client import ESHttpCompatClient
+from app.services.es_index_config import (
+    build_index_body_with_ik,
+    build_index_body_without_ik
+)
+from app.services.ragflow_query_builder import build_weighted_es_query
+from app.services.ragflow_query_builder import metadata_filter_field
 from app.utils.logger import rag_search_logger
 
 
@@ -32,14 +44,37 @@ class ESService:
         else:
             host = es_host
             port = 9200
+        self.base_url = f"{Config.ES_SCHEME}://{host}:{port}"
 
         self.client = Elasticsearch(
             hosts=[{"host": host, "port": int(port), "scheme": Config.ES_SCHEME}],
             basic_auth=(Config.ES_USERNAME, Config.ES_PASSWORD),
-            verify_certs=False,
+            verify_certs=Config.ES_VERIFY_CERTS,
             request_timeout=30
         )
         self._connected = False
+        self._using_http_compat = False
+
+    def _switch_to_http_compat_client(self) -> bool:
+        """切换到 HTTP 兼容客户端。"""
+        rag_search_logger.warning("[ES] 官方客户端产品校验失败，切换 HTTP 兼容客户端")
+        self.client = ESHttpCompatClient(
+            base_url=self.base_url,
+            username=Config.ES_USERNAME,
+            password=Config.ES_PASSWORD
+        )
+        self._using_http_compat = True
+        return self.client.ping()
+
+    def _ensure_compatible_client(self) -> None:
+        """确保当前客户端可用于真实 ES 服务。"""
+        if self._using_http_compat:
+            return
+        try:
+            if not self.client.ping():
+                self.client.info()
+        except UnsupportedProductError:
+            self._switch_to_http_compat_client()
 
     def is_connected(self) -> bool:
         """
@@ -48,8 +83,13 @@ class ESService:
         @returns 连接状态
         """
         try:
-            return self.client.ping()
-        except ESConnectionError:
+            if self.client.ping():
+                return True
+            self.client.info()
+            return True
+        except UnsupportedProductError:
+            return self._switch_to_http_compat_client()
+        except (ESConnectionError, httpx.HTTPError):
             return False
 
     async def create_index_if_not_exists(self, index_name: str):
@@ -60,22 +100,29 @@ class ESService:
 
         @param index_name - 索引名称
         """
+        self._ensure_compatible_client()
         if self.client.indices.exists(index=index_name):
-            rag_search_logger.info(f"[ES] 索引已存在: {index_name}")
+            rag_search_logger.info("[ES] 索引已存在: {}", index_name)
             return
 
         # 检查是否有 IK 分词器
         has_ik = self._check_ik_analyzer()
 
         if has_ik:
-            rag_search_logger.info(f"[ES] 使用 IK 中文分词器创建索引: {index_name}")
-            index_body = self._build_index_body_with_ik()
+            rag_search_logger.info("[ES] 使用 IK 中文分词器创建索引: {}", index_name)
+            index_body = build_index_body_with_ik()
         else:
-            rag_search_logger.warning(f"[ES] IK 分词器不可用，降级使用 standard 分词器: {index_name}")
-            index_body = self._build_index_body_without_ik()
+            rag_search_logger.warning("[ES] IK 分词器不可用，降级使用 standard 分词器: {}", index_name)
+            index_body = build_index_body_without_ik()
 
-        self.client.indices.create(index=index_name, body=index_body)
-        rag_search_logger.info(f"[ES] 索引创建成功: {index_name}")
+        try:
+            self.client.indices.create(index=index_name, body=index_body)
+        except Exception:
+            if not has_ik:
+                raise
+            rag_search_logger.warning("[ES] IK 同义词索引创建失败，降级使用 standard 分词器: {}", index_name)
+            self.client.indices.create(index=index_name, body=build_index_body_without_ik())
+        rag_search_logger.info("[ES] 索引创建成功: {}", index_name)
 
     def _check_ik_analyzer(self) -> bool:
         """
@@ -91,124 +138,6 @@ class ESService:
             return True
         except Exception:
             return False
-
-    def _build_index_body_with_ik(self) -> dict:
-        """
-        构建使用 IK 分词器的索引配置
-
-        使用本地同义词文件（synonyms.txt）
-
-        @returns 索引配置
-        """
-        return {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0,
-                "analysis": {
-                    "filter": {
-                        "synonym_filter": {
-                            "type": "synonym",
-                            "synonyms_path": "synonyms.txt",
-                            "updateable": True
-                        }
-                    },
-                    "analyzer": {
-                        "ik_max_word": {
-                            "type": "custom",
-                            "tokenizer": "ik_max_word",
-                            "filter": ["lowercase"]
-                        },
-                        "ik_smart_synonym": {
-                            "type": "custom",
-                            "tokenizer": "ik_smart",
-                            "filter": ["lowercase", "synonym_filter"]
-                        },
-                        "ik_max_word_synonym": {
-                            "type": "custom",
-                            "tokenizer": "ik_max_word",
-                            "filter": ["lowercase", "synonym_filter"]
-                        }
-                    }
-                }
-            },
-            "mappings": {
-                "properties": {
-                    "id": {"type": "keyword"},
-                    "description": {
-                        "type": "text",
-                        "analyzer": "ik_max_word",
-                        "search_analyzer": "ik_smart_synonym"
-                    },
-                    "description_en": {
-                        "type": "text",
-                        "analyzer": "ik_max_word",
-                        "search_analyzer": "ik_max_word_synonym"
-                    },
-                    "collection": {"type": "keyword"},
-                    "features": {"type": "object", "enabled": True},
-                    "vector_id": {"type": "keyword"},
-                    "metadata": {"type": "object", "enabled": True}
-                }
-            }
-        }
-
-    def _build_index_body_without_ik(self) -> dict:
-        """
-        构建不使用 IK 分词器的索引配置（降级方案）
-
-        使用 ngram 和 standard 分词器作为替代
-
-        @returns 索引配置
-        """
-        return {
-            "settings": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0,
-                "analysis": {
-                    "analyzer": {
-                        "default": {
-                            "type": "standard",
-                            "stopwords": "_english_"
-                        },
-                        "ngram_analyzer": {
-                            "type": "custom",
-                            "tokenizer": "ngram_tokenizer",
-                            "filter": ["lowercase"]
-                        }
-                    },
-                    "tokenizer": {
-                        "ngram_tokenizer": {
-                            "type": "ngram",
-                            "min_gram": 2,
-                            "max_gram": 4,
-                            "token_chars": ["letter", "digit"]
-                        }
-                    }
-                }
-            },
-            "mappings": {
-                "properties": {
-                    "id": {"type": "keyword"},
-                    "description": {
-                        "type": "text",
-                        "analyzer": "default"
-                    },
-                    "description_en": {
-                        "type": "text",
-                        "analyzer": "default"
-                    },
-                    "lang": {"type": "keyword"},
-                    "metadata": {
-                        "type": "object",
-                        "enabled": True
-                    },
-                    "features": {
-                        "type": "object",
-                        "enabled": True
-                    }
-                }
-            }
-        }
 
     async def index_document(
         self,
@@ -229,12 +158,77 @@ class ESService:
         @param lang - 语言类型，"zh" 或 "en"
         @param features - 特征标签
         """
-        # 根据语言选择存储字段
-        doc_body = {
-            "id": doc_id,
-            "metadata": metadata
-        }
+        self._ensure_compatible_client()
+        doc_body = self._build_document_body(doc_id, description, metadata, lang, features)
+        self.client.index(
+            index=index_name,
+            id=doc_id,
+            body=doc_body
+        )
+        rag_search_logger.debug("[ES] 文档索引成功: {}, has_features={}", doc_id, features is not None)
 
+    async def index_documents(self, index_name: str, documents: List[Dict[str, Any]]) -> int:
+        """
+        批量索引文档
+
+        @param index_name - 索引名称
+        @param documents - 文档列表
+        @returns 成功写入数量
+        """
+        if not documents:
+            return 0
+
+        self._ensure_compatible_client()
+        if self._using_http_compat:
+            for document in documents:
+                await self.index_document(
+                    index_name=index_name,
+                    doc_id=document["doc_id"],
+                    description=document["description"],
+                    metadata=document["metadata"],
+                    lang=document.get("lang", "zh"),
+                    features=document.get("features")
+                )
+            return len(documents)
+
+        actions = [
+            {
+                "_op_type": "index",
+                "_index": index_name,
+                "_id": document["doc_id"],
+                "_source": self._build_document_body(
+                    doc_id=document["doc_id"],
+                    description=document["description"],
+                    metadata=document["metadata"],
+                    lang=document.get("lang", "zh"),
+                    features=document.get("features")
+                )
+            }
+            for document in documents
+        ]
+        success_count, _ = helpers.bulk(self.client, actions)
+        rag_search_logger.debug("[ES] 批量索引成功: index={}, count={}", index_name, success_count)
+        return success_count
+
+    def _build_document_body(
+        self,
+        doc_id: str,
+        description: str,
+        metadata: Dict[str, Any],
+        lang: str = "zh",
+        features: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        构建 ES 文档体
+
+        @param doc_id - 文档ID
+        @param description - 文档描述
+        @param metadata - 元数据
+        @param lang - 语言类型
+        @param features - 特征标签
+        @returns ES 文档体
+        """
+        doc_body = {"id": doc_id, "metadata": metadata}
         if lang == "zh":
             doc_body["description"] = description
             doc_body["lang"] = "zh"
@@ -242,23 +236,51 @@ class ESService:
             doc_body["description_en"] = description
             doc_body["lang"] = "en"
 
-        # 添加 features
         if features:
             doc_body["features"] = features
+        if metadata.get("parent_id"):
+            doc_body["parent_id"] = metadata["parent_id"]
+        if metadata.get("section_title"):
+            doc_body["section_title"] = metadata["section_title"]
+        doc_body.update(self._build_ragflow_compatible_fields(description, metadata, features))
+        return doc_body
 
-        self.client.index(
-            index=index_name,
-            id=doc_id,
-            body=doc_body
-        )
-        rag_search_logger.debug(f"[ES] 文档索引成功: {doc_id}, has_features={features is not None}")
+    def _build_ragflow_compatible_fields(
+        self,
+        description: str,
+        metadata: Dict[str, Any],
+        features: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """构建兼容 RAGFlow 字段权重查询的富字段。"""
+        features = features or {}
+        title = features.get("title") or metadata.get("title") or metadata.get("description") or ""
+        category = features.get("category")
+        tags = features.get("tags") or []
+        if not isinstance(tags, list):
+            tags = [str(tags)]
+        important_keywords = [value for value in [category, *tags] if value]
+        questions = features.get("questions") or []
+        if not isinstance(questions, list):
+            questions = [str(questions)]
+
+        return {
+            "title_tks": title,
+            "title_sm_tks": title,
+            "important_kwd": important_keywords,
+            "important_tks": " ".join(important_keywords),
+            "question_tks": " ".join(str(question) for question in questions if question),
+            "content_ltks": description,
+            "content_sm_ltks": description,
+            "content_with_weight": description,
+        }
 
     async def search(
         self,
         index_name: str,
         query: str,
         top_k: int,
-        query_lang: str = "auto"
+        query_lang: str = "auto",
+        metadata_filter: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         BM25 搜索
@@ -269,23 +291,33 @@ class ESService:
         @param query - 查询文本
         @param top_k - 返回数量
         @param query_lang - 查询语言，"zh"、"en" 或 "auto"（当前未使用，保留扩展）
+        @param metadata_filter - metadata 字段过滤条件
         @returns 搜索结果列表
         """
         # 同时搜索 description 和 description_en 两个字段
         # 以确保无论查询是中文还是英文，都能召回对应语言存储的文档
-        body = {
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["description", "description_en"],
-                    "type": "best_fields",
-                    "fuzziness": "AUTO"
+        query_body: Dict[str, Any] = {
+            "multi_match": {
+                "query": query,
+                "fields": ["description", "description_en"],
+                "type": "best_fields",
+                "fuzziness": "AUTO"
+            }
+        }
+        if metadata_filter:
+            query_body = {
+                "bool": {
+                    "must": query_body,
+                    "filter": self._build_metadata_filters(metadata_filter)
                 }
-            },
+            }
+        body = {
+            "query": query_body,
             "size": top_k
         }
 
         try:
+            self._ensure_compatible_client()
             result = self.client.search(index=index_name, body=body)
             hits = result.get("hits", {}).get("hits", [])
 
@@ -300,10 +332,142 @@ class ESService:
                 for hit in hits
             ]
         except ESConnectionError as e:
-            rag_search_logger.error(f"[ES] 连接失败: {e}")
+            rag_search_logger.error("[ES] 连接失败: {}", str(e))
             raise
         except Exception as e:
-            rag_search_logger.error(f"[ES] 搜索失败: {e}")
+            rag_search_logger.error("[ES] 搜索失败: {}", str(e))
+            raise
+
+    async def search_weighted(
+        self,
+        index_name: str,
+        query: str,
+        top_k: int,
+        metadata_filter: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """执行 RAGFlow-inspired 字段加权文本搜索。"""
+        body = build_weighted_es_query(query, top_k, metadata_filter)
+        try:
+            self._ensure_compatible_client()
+            result = self.client.search(index=index_name, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            return [
+                {
+                    "id": hit["_id"],
+                    "score": hit["_score"],
+                    "description": hit["_source"].get("description") or hit["_source"].get("description_en", ""),
+                    "metadata": hit["_source"].get("metadata", {}),
+                    "features": hit["_source"].get("features", {}),
+                    "source_scores": {"text": hit["_score"]},
+                }
+                for hit in hits
+            ]
+        except ESConnectionError as e:
+            rag_search_logger.error("[ES] weighted 搜索连接失败: {}", str(e))
+            raise
+        except Exception as e:
+            rag_search_logger.error("[ES] weighted 搜索失败: {}", str(e))
+            raise
+
+    async def search_parent_contexts(
+        self,
+        index_name: str,
+        parent_ids: List[str],
+        section_ids: Optional[List[str]] = None,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """按父文档/章节批量读取上下文 chunk。"""
+        filters: List[Dict[str, Any]] = []
+        if parent_ids:
+            filters.append({"terms": {"metadata.parent_id.keyword": parent_ids}})
+        if section_ids:
+            filters.append({"terms": {"metadata.section_id.keyword": section_ids}})
+        if not filters:
+            return []
+
+        body = {
+            "query": {
+                "bool": {
+                    "filter": filters
+                }
+            },
+            "size": limit
+        }
+
+        try:
+            self._ensure_compatible_client()
+            result = self.client.search(index=index_name, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            return [
+                {
+                    "id": hit["_id"],
+                    "score": hit.get("_score", 0),
+                    "description": hit["_source"].get("description") or hit["_source"].get("description_en", ""),
+                    "metadata": hit["_source"].get("metadata", {}),
+                    "features": hit["_source"].get("features", {})
+                }
+                for hit in hits
+            ]
+        except NotFoundError:
+            rag_search_logger.warning("[ES] 索引不存在，无法读取父上下文: {}", index_name)
+            return []
+        except ESConnectionError as e:
+            rag_search_logger.error("[ES] 父上下文查询连接失败: {}", str(e))
+            raise
+        except Exception as e:
+            rag_search_logger.error("[ES] 父上下文查询失败: {}", str(e))
+            raise
+
+    def _build_metadata_filters(self, metadata_filter: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        构建 metadata 字段过滤条件
+
+        @param metadata_filter - metadata 字段过滤键值
+        @returns ES bool.filter 条件列表
+        """
+        filters = []
+        for key, value in metadata_filter.items():
+            if value is None:
+                continue
+            filters.append({"term": {metadata_filter_field(key, value): value}})
+        return filters
+
+    async def list_documents(self, index_name: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        列出索引内文档
+
+        用于从 ES 重建轻量图谱索引。
+
+        @param index_name - 索引名称
+        @param limit - 返回数量上限
+        @returns 标准化文档列表
+        """
+        body = {
+            "query": {"match_all": {}},
+            "size": limit
+        }
+
+        try:
+            self._ensure_compatible_client()
+            result = self.client.search(index=index_name, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            return [
+                {
+                    "id": hit["_id"],
+                    "description": hit["_source"].get("description") or hit["_source"].get("description_en", ""),
+                    "metadata": hit["_source"].get("metadata", {}),
+                    "features": hit["_source"].get("features", {})
+                }
+                for hit in hits
+            ]
+        except NotFoundError:
+            rag_search_logger.warning("[ES] 索引不存在，无法列出文档: {}", index_name)
+            return []
+        except ESConnectionError as e:
+            rag_search_logger.error("[ES] 连接失败: {}", str(e))
+            raise
+        except Exception as e:
+            rag_search_logger.error("[ES] 列出文档失败: {}", str(e))
             raise
 
     async def delete_document(self, index_name: str, doc_id: str) -> bool:
@@ -315,14 +479,15 @@ class ESService:
         @returns 是否删除成功
         """
         try:
+            self._ensure_compatible_client()
             self.client.delete(index=index_name, id=doc_id)
-            rag_search_logger.debug(f"[ES] 文档删除成功: {doc_id}")
+            rag_search_logger.debug("[ES] 文档删除成功: {}", doc_id)
             return True
         except NotFoundError:
-            rag_search_logger.warning(f"[ES] 文档不存在: {doc_id}")
+            rag_search_logger.warning("[ES] 文档不存在: {}", doc_id)
             return False
         except Exception as e:
-            rag_search_logger.error(f"[ES] 删除失败: {e}")
+            rag_search_logger.error("[ES] 删除失败: {}", str(e))
             raise
 
     def _detect_language(self, text: str) -> str:

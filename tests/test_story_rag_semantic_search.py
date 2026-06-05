@@ -12,8 +12,8 @@ RAG 语义检索故事线测试用例
 3. 批量插入接口
 4. 语义检索接口
 5. 删除接口
-6. 语义优化接口（待实现）
-7. 日志增强（待实现）
+6. 语义优化接口
+7. 日志增强
 
 @author lvdaxianerplus
 @date 2026-04-15
@@ -21,100 +21,162 @@ RAG 语义检索故事线测试用例
 
 import pytest
 import pytest_asyncio
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import AsyncClient, ASGITransport
+from app.models.schemas import OptimizeSearchRequest, OptimizeSearchResponse
 
 
-# =============================================================================
-# Fixtures
-# =============================================================================
+def test_optimize_search_request_defaults():
+    """
+    场景：语义优化检索请求只传入 input
 
-_mock_embedding_service = None
-_mock_rerank_service = None
-_mock_milvus_service = None
-_mock_feature_extract_service = None
-_mock_feature_boost_service = None
-_mock_es_service = None
+    预期：使用默认检索参数
+    """
+    request = OptimizeSearchRequest(input="查找登录失败原因")
+    assert request.type == "all"
+    assert request.topK == 20
+    assert request.enableFeatureBoost is False
+
+
+def test_optimize_search_response_shape():
+    """
+    场景：语义优化检索响应包含 SEE 追踪
+
+    预期：响应可表达优化前后查询和过程追踪
+    """
+    response = OptimizeSearchResponse(
+        code=200,
+        message="success",
+        data={
+            "request_id": "req-test",
+            "original_query": "登录失败",
+            "optimized_query": "登录失败的常见原因和排查步骤",
+            "intent": "排查登录失败原因",
+            "cot_plan": ["识别登录失败现象", "检索认证错误原因"],
+            "expanded_queries": ["登录失败原因", "认证失败排查"],
+            "see_trace": [
+                {"stage": "intent", "summary": "识别排查登录失败原因", "metrics": {}},
+                {"stage": "retrieval", "summary": "执行原始查询和优化查询", "metrics": {"query_count": 2}}
+            ],
+            "original_results": [],
+            "optimized_results": [],
+            "comparison": {"original_count": 0, "optimized_count": 0},
+            "fallback_used": False
+        }
+    )
+    assert response.data.optimized_query == "登录失败的常见原因和排查步骤"
+    assert response.data.see_trace[0]["stage"] == "intent"
 
 
 def get_mock_es_service():
     """获取 Mock ES 服务"""
-    global _mock_es_service
-    if _mock_es_service is None:
-        _mock_es_service = MagicMock()
-        _mock_es_service.index_document = AsyncMock(return_value=None)
-        _mock_es_service.search = AsyncMock(return_value=[])
-        _mock_es_service.delete_document = AsyncMock(return_value=True)
-        _mock_es_service.health_check = MagicMock(return_value=True)
-    return _mock_es_service
+    mock_es_service = MagicMock()
+    mock_es_service.index_document = AsyncMock(return_value=None)
+    mock_es_service.index_documents = AsyncMock(return_value=0)
+    mock_es_service.search = AsyncMock(return_value=[])
+    mock_es_service.delete_document = AsyncMock(return_value=True)
+    mock_es_service.health_check = MagicMock(return_value=True)
+    mock_es_service.is_connected = MagicMock(return_value=True)
+    return mock_es_service
 
 
 def get_mock_embedding_service():
     """获取 Mock Embedding 服务"""
-    global _mock_embedding_service
-    if _mock_embedding_service is None:
-        _mock_embedding_service = AsyncMock()
-        _mock_embedding_service.encode = AsyncMock(return_value=[0.1] * 8192)
-        _mock_embedding_service.health_check = AsyncMock(return_value=True)
-    return _mock_embedding_service
+    mock_embedding_service = AsyncMock()
+    mock_embedding_service.encode = AsyncMock(return_value=[0.1] * 8192)
+    mock_embedding_service.health_check = AsyncMock(return_value=True)
+    return mock_embedding_service
 
 
 def get_mock_rerank_service():
     """获取 Mock Rerank 服务"""
-    global _mock_rerank_service
-    if _mock_rerank_service is None:
-        _mock_rerank_service = AsyncMock()
-        _mock_rerank_service.rerank = AsyncMock(return_value=[
-            {"index": 0, "score": 0.85},
-            {"index": 1, "score": 0.72}
-        ])
-        _mock_rerank_service.health_check = AsyncMock(return_value=True)
-    return _mock_rerank_service
+    mock_rerank_service = AsyncMock()
+    mock_rerank_service.rerank = AsyncMock(return_value=[
+        {"index": 0, "score": 0.85},
+        {"index": 1, "score": 0.72}
+    ])
+    mock_rerank_service.health_check = AsyncMock(return_value=True)
+    return mock_rerank_service
 
 
 def get_mock_milvus_service():
     """获取 Mock Milvus 服务"""
-    global _mock_milvus_service
-    if _mock_milvus_service is None:
-        _mock_milvus_service = AsyncMock()
-        _mock_milvus_service.insert = AsyncMock(return_value={
-            "id": "test-id",
-            "collection": "skill",
-            "features": {"category": "模型", "tags": ["3D", "飞机"]}
-        })
-        _mock_milvus_service.batch_insert = AsyncMock(return_value={"inserted_count": 2})
-        _mock_milvus_service.search = AsyncMock(return_value=[
-            {"id": "skill-001", "description": "用户登录功能", "metadata": {"type": "skill", "id": "skill-001"}, "features": {"category": "模型", "tags": ["登录"]}, "score": 0.85},
-            {"id": "skill-002", "description": "用户注册功能", "metadata": {"type": "skill", "id": "skill-002"}, "features": {"category": "模型", "tags": ["注册"]}, "score": 0.72}
-        ])
-        _mock_milvus_service.delete = AsyncMock(return_value=True)
-        _mock_milvus_service.collection_exists = AsyncMock(return_value=True)
-        _mock_milvus_service.create_collection = AsyncMock(return_value=True)
-        _mock_milvus_service.health_check = AsyncMock(return_value=True)
-    return _mock_milvus_service
+    mock_milvus_service = AsyncMock()
+
+    async def mock_insert(collection, doc_id, description, vector, metadata, features=None):
+        return {
+            "id": doc_id,
+            "collection": collection,
+            "features": features or {"category": "模型", "tags": ["3D", "飞机"]}
+        }
+
+    async def mock_batch_insert(collection, documents):
+        return {"inserted_count": len(documents)}
+
+    mock_milvus_service.insert = AsyncMock(side_effect=mock_insert)
+    mock_milvus_service.batch_insert = AsyncMock(side_effect=mock_batch_insert)
+    mock_milvus_service.search = AsyncMock(return_value=[
+        {"id": "skill-001", "description": "用户登录功能", "metadata": {"type": "skill", "id": "skill-001"}, "features": {"category": "模型", "tags": ["登录"]}, "score": 0.85},
+        {"id": "skill-002", "description": "用户注册功能", "metadata": {"type": "skill", "id": "skill-002"}, "features": {"category": "模型", "tags": ["注册"]}, "score": 0.72}
+    ])
+    mock_milvus_service.delete = AsyncMock(return_value=True)
+    mock_milvus_service.collection_exists = AsyncMock(return_value=True)
+    mock_milvus_service.create_collection = AsyncMock(return_value=True)
+    mock_milvus_service.health_check = AsyncMock(return_value=True)
+    return mock_milvus_service
 
 
 def get_mock_feature_extract_service():
     """获取 Mock 特征提取服务"""
-    global _mock_feature_extract_service
-    if _mock_feature_extract_service is None:
-        _mock_feature_extract_service = AsyncMock()
-        _mock_feature_extract_service.extract_features = AsyncMock(return_value={
+    mock_feature_extract_service = AsyncMock()
+    mock_feature_extract_service.extract_features = AsyncMock(return_value={
+        "category": "模型",
+        "tags": ["3D", "飞机", "飞行"]
+    })
+    mock_feature_extract_service.extract_features_batch = AsyncMock(side_effect=lambda descriptions: [
+        {
             "category": "模型",
             "tags": ["3D", "飞机", "飞行"]
-        })
-        _mock_feature_extract_service.health_check = AsyncMock(return_value=True)
-    return _mock_feature_extract_service
+        }
+        for _ in descriptions
+    ])
+    mock_feature_extract_service.health_check = AsyncMock(return_value=True)
+    return mock_feature_extract_service
+
+
+def get_mock_entity_relation_service():
+    """获取 Mock 实体关系抽取服务"""
+    mock_entity_relation_service = AsyncMock()
+    mock_entity_relation_service.extract = AsyncMock(return_value={
+        "entities": [{"name": "JWT", "type": "技术组件"}],
+        "relations": [{"source": "JWT", "target": "登录认证", "relation": "用于"}]
+    })
+    mock_entity_relation_service.extract_batch = AsyncMock(side_effect=lambda descriptions: [
+        {
+            "entities": [{"name": "JWT", "type": "技术组件"}],
+            "relations": [{"source": "JWT", "target": "登录认证", "relation": "用于"}]
+        }
+        for _ in descriptions
+    ])
+    return mock_entity_relation_service
+
+
+def get_mock_graph_retrieval_service():
+    """获取 Mock 图检索服务"""
+    mock_graph_retrieval_service = MagicMock()
+    mock_graph_retrieval_service.index_document = MagicMock(return_value=None)
+    mock_graph_retrieval_service.index_documents = MagicMock(return_value=0)
+    mock_graph_retrieval_service.search = MagicMock(return_value=[])
+    return mock_graph_retrieval_service
 
 
 def get_mock_feature_boost_service():
     """获取 Mock 特征加权服务"""
-    global _mock_feature_boost_service
-    if _mock_feature_boost_service is None:
-        _mock_feature_boost_service = AsyncMock()
-        _mock_feature_boost_service.boost = AsyncMock(side_effect=lambda query, results, **kwargs: results)
-        _mock_feature_boost_service.health_check = AsyncMock(return_value=True)
-    return _mock_feature_boost_service
+    mock_feature_boost_service = AsyncMock()
+    mock_feature_boost_service.boost = AsyncMock(side_effect=lambda query, results, **kwargs: results)
+    mock_feature_boost_service.health_check = AsyncMock(return_value=True)
+    return mock_feature_boost_service
 
 
 @pytest_asyncio.fixture
@@ -125,6 +187,8 @@ async def mock_services():
         "rerank": get_mock_rerank_service(),
         "milvus": get_mock_milvus_service(),
         "feature_extract": get_mock_feature_extract_service(),
+        "entity_relation": get_mock_entity_relation_service(),
+        "graph_retrieval": get_mock_graph_retrieval_service(),
         "feature_boost": get_mock_feature_boost_service(),
         "es": get_mock_es_service()
     }
@@ -133,17 +197,35 @@ async def mock_services():
 @pytest_asyncio.fixture
 async def app_router(mock_services):
     """创建带有 mock 服务的 app"""
-    with patch("app.services.embedding_service.EmbeddingService", return_value=mock_services["embedding"]), \
-         patch("app.services.rerank_service.RerankService", return_value=mock_services["rerank"]), \
-         patch("app.services.milvus_service.MilvusService", return_value=mock_services["milvus"]), \
-         patch("app.routers.rag.get_embedding_service", return_value=lambda: mock_services["embedding"]), \
-         patch("app.routers.rag.get_rerank_service", return_value=lambda: mock_services["rerank"]), \
-         patch("app.routers.rag.get_milvus_service", return_value=lambda: mock_services["milvus"]), \
-         patch("app.routers.rag.get_feature_extract_service", return_value=lambda: mock_services["feature_extract"]), \
-         patch("app.routers.rag.get_feature_boost_service", return_value=lambda: mock_services["feature_boost"]), \
-         patch("app.routers.rag.get_es_service", return_value=lambda: mock_services.get("es", MagicMock())):
+    patches = [
+        patch("app.services.embedding_service.EmbeddingService", return_value=mock_services["embedding"]),
+        patch("app.services.rerank_service.RerankService", return_value=mock_services["rerank"]),
+        patch("app.services.milvus_service.MilvusService", return_value=mock_services["milvus"]),
+        patch("app.main.EmbeddingService", return_value=mock_services["embedding"]),
+        patch("app.main.RerankService", return_value=mock_services["rerank"]),
+        patch("app.main.MilvusService", return_value=mock_services["milvus"]),
+        patch("app.main.get_es_service", return_value=mock_services["es"]),
+        patch("app.services.rag_search_pipeline_service.get_embedding_service", return_value=mock_services["embedding"]),
+        patch("app.services.rag_search_pipeline_service.get_rerank_service", return_value=mock_services["rerank"]),
+        patch("app.services.rag_search_pipeline_service.get_milvus_service", return_value=mock_services["milvus"]),
+        patch("app.services.rag_search_pipeline_service.get_graph_retrieval_service", return_value=mock_services["graph_retrieval"]),
+        patch("app.services.rag_search_pipeline_service.get_feature_boost_service", return_value=mock_services["feature_boost"]),
+        patch("app.services.rag_search_pipeline_service.get_es_service", return_value=mock_services.get("es", MagicMock())),
+        patch("app.routers.rag_delete.get_milvus_service", return_value=mock_services["milvus"]),
+        patch("app.routers.rag_delete.get_graph_retrieval_service", return_value=mock_services["graph_retrieval"]),
+        patch("app.routers.rag_delete.get_es_service", return_value=mock_services.get("es", MagicMock())),
+        patch("app.routers.rag_insert.get_embedding_service", return_value=mock_services["embedding"]),
+        patch("app.routers.rag_insert.get_milvus_service", return_value=mock_services["milvus"]),
+        patch("app.routers.rag_insert.get_feature_extract_service", return_value=mock_services["feature_extract"]),
+        patch("app.routers.rag_insert.get_entity_relation_service", return_value=mock_services["entity_relation"]),
+        patch("app.routers.rag_insert.get_graph_retrieval_service", return_value=mock_services["graph_retrieval"]),
+        patch("app.routers.rag_insert.get_es_service", return_value=mock_services.get("es", MagicMock())),
+    ]
+    with ExitStack() as stack:
+        for patcher in patches:
+            stack.enter_context(patcher)
         from app.main import app
-        return app
+        yield app
 
 
 @pytest_asyncio.fixture
@@ -407,7 +489,7 @@ class TestStoryUserAInsert:
         """
         场景：Embedding 服务调用失败
 
-        预期：500 Internal Server Error
+        预期：进入重试队列，返回 202
         """
         mock_services["embedding"].encode = AsyncMock(side_effect=Exception("Embedding Error"))
         request_body = {
@@ -419,7 +501,10 @@ class TestStoryUserAInsert:
             }
         }
         response = await async_client.post("/api/v1/rag/test-user/insert", json=request_body)
-        assert response.status_code == 500
+        assert response.status_code == 200
+        data = response.json()
+        assert data["code"] == 202
+        assert data["message"] == "pending_retry"
 
 
 # =============================================================================
@@ -497,6 +582,31 @@ class TestStoryBatchInsert:
         assert data["data"]["inserted_count"] == 100
 
     @pytest.mark.asyncio
+    async def test_batch_insert_rejects_mixed_metadata_types(self, async_client):
+        """
+        场景：批量插入混合资源类型
+
+        预期：返回 400，避免写入错误 collection
+        """
+        request_body = {
+            "items": [
+                {
+                    "description": "skill A",
+                    "metadata": {"type": "skill", "id": "skill-A", "description": "A"}
+                },
+                {
+                    "description": "asset B",
+                    "metadata": {"type": "asset", "id": "asset-B", "description": "B"}
+                }
+            ]
+        }
+
+        response = await async_client.post("/api/v1/rag/test-user/insert/batch", json=request_body)
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == 1003
+
+    @pytest.mark.asyncio
     async def test_batch_insert_empty_items(self, async_client):
         """
         场景：items 为空列表
@@ -556,12 +666,66 @@ class TestStoryUserBSearch:
             "type": "all",
             "topK": 20
         }
-        response = await async_client.post("/api/v1/rag/test-user/search", json=request_body)
+        with patch("app.services.rag_search_pipeline_service.get_es_service", return_value=mock_services["es"]):
+            response = await async_client.post("/api/v1/rag/test-user/search", json=request_body)
         assert response.status_code == 200
         data = response.json()
         assert data["code"] == 200
         assert isinstance(data["data"], list)
         assert len(data["data"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_search_type_all_queries_both_es_indexes(self, async_client, mock_services):
+        """
+        场景：用户B 检索 type=all
+
+        预期：ES BM25 同时搜索 skill 和 asset 索引
+        """
+        searched_indexes = []
+
+        async def fake_search(index_name, query, top_k, query_lang="auto", metadata_filter=None):
+            searched_indexes.append(index_name)
+            return []
+
+        mock_services["es"].search = AsyncMock(side_effect=fake_search)
+        request_body = {
+            "input": "查找登录相关资源",
+            "type": "all",
+            "topK": 5
+        }
+
+        with patch("app.services.rag_search_pipeline_service.get_es_service", return_value=mock_services["es"]):
+            response = await async_client.post("/api/v1/rag/test-user/search", json=request_body)
+
+        assert response.status_code == 200
+        assert "rag_skills" in searched_indexes
+        assert "rag_assets" in searched_indexes
+
+    @pytest.mark.asyncio
+    async def test_search_type_skill_filters_es_by_metadata_type(self, async_client, mock_services):
+        """
+        场景：用户B 只检索 skill
+
+        预期：ES BM25 搜索附带 metadata.type 过滤，避免历史评测或其他类型数据混入
+        """
+        received_filters = []
+
+        async def fake_search(index_name, query, top_k, query_lang="auto", metadata_filter=None):
+            received_filters.append(metadata_filter)
+            return []
+
+        mock_services["es"].search = AsyncMock(side_effect=fake_search)
+        request_body = {
+            "input": "查找登录相关资源",
+            "type": "skill",
+            "topK": 5
+        }
+
+        with patch("app.services.rag_search_pipeline_service.get_es_service", return_value=mock_services["es"]):
+            response = await async_client.post("/api/v1/rag/test-user/search", json=request_body)
+
+        assert response.status_code == 200
+        assert received_filters == [{"type": "skill"}]
 
     @pytest.mark.asyncio
     async def test_search_type_skill(self, async_client, mock_services):
@@ -897,57 +1061,114 @@ class TestStoryDelete:
 
 
 # =============================================================================
-# 故事线测试 6: 语义优化（待实现）
+# 故事线测试 6: 语义优化
 # =============================================================================
 
 class TestStorySemanticOptimization:
     """
-    故事节点 6: 语义优化检索（待实现功能）
+    故事节点 6: 语义优化检索
     当检索结果不满意时，调用大模型丰富语义再次检索
     """
 
     @pytest.mark.asyncio
-    async def test_semantic_optimization_not_implemented(self, async_client):
+    async def test_semantic_optimization_search_loop(self, async_client):
         """
-        场景：语义优化接口尚未实现
+        场景：语义优化接口执行原始查询和优化查询
 
-        预期：404 Not Found 或 501 Not Implemented
+        预期：返回优化前后结果与 SEE 追踪
         """
+        optimizer = AsyncMock()
+        optimizer.optimize.return_value = {
+            "intent": "查找登录相关内容",
+            "cot_plan": ["识别登录主题", "检索认证相关资料"],
+            "optimized_query": "登录认证相关的功能和错误处理",
+            "expanded_queries": ["查找登录相关的内容", "登录认证相关的功能和错误处理"],
+            "see_trace": [{"stage": "intent", "summary": "查找登录相关内容", "metrics": {}}],
+            "fallback_used": False,
+            "fallback_reason": ""
+        }
         request_body = {
             "input": "查找登录相关的内容",
-            "optimize": True
+            "type": "skill",
+            "topK": 5
         }
-        response = await async_client.post("/api/v1/rag/test-user/search", json=request_body)
-        # 当前未实现，应该返回 404 或错误提示
-        assert response.status_code in [404, 501, 422]
+        with patch("app.routers.rag_optimize.get_query_optimize_service", return_value=optimizer):
+            response = await async_client.post("/api/v1/rag/test-user/search/optimize", json=request_body)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["original_query"] == "查找登录相关的内容"
+        assert data["optimized_query"] == "登录认证相关的功能和错误处理"
+        assert data["cot_plan"] == ["识别登录主题", "检索认证相关资料"]
+        assert data["fallback_used"] is False
+        assert "history_id" in data["comparison"]
+        assert any(item["stage"] == "optimized_retrieval" for item in data["see_trace"])
+        optimizer.optimize.assert_awaited_once_with("查找登录相关的内容")
+
+        history_response = await async_client.get("/api/v1/rag/test-user/search/optimize/history")
+        assert history_response.status_code == 200
+        history_items = history_response.json()["data"]
+        assert any(item["history_id"] == data["comparison"]["history_id"] for item in history_items)
 
     @pytest.mark.asyncio
     async def test_semantic_optimization_llm_call(self, async_client):
         """
-        场景：调用大模型优化查询（待实现）
+        场景：调用大模型优化查询
 
         预期：大模型返回优化后的查询文本
         """
-        # TODO: 实现语义优化功能后，此测试应验证：
-        # 1. 调用大模型 API 传入原始查询
-        # 2. 大模型返回优化后的查询
-        # 3. 使用优化后的查询重新检索
-        # 4. 返回优化后的结果
-        pass
+        optimizer = AsyncMock()
+        optimizer.optimize.return_value = {
+            "intent": "查找登录相关内容",
+            "cot_plan": ["识别登录主题", "检索认证相关资料"],
+            "optimized_query": "登录认证相关的功能和错误处理",
+            "expanded_queries": ["查找登录相关的内容", "登录认证相关的功能和错误处理"],
+            "see_trace": [{"stage": "intent", "summary": "查找登录相关内容", "metrics": {}}],
+            "fallback_used": False,
+            "fallback_reason": ""
+        }
+
+        with patch("app.routers.rag_optimize.get_query_optimize_service", return_value=optimizer):
+            response = await async_client.post(
+                "/api/v1/rag/test-user/search/optimize",
+                json={"input": "查找登录相关的内容", "type": "skill", "topK": 5}
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["data"]["intent"] == "查找登录相关内容"
+        assert body["data"]["comparison"]["original_count"] >= 0
+        assert body["data"]["comparison"]["optimized_count"] >= 0
 
     @pytest.mark.asyncio
     async def test_semantic_optimization_logging(self, async_client):
         """
-        场景：语义优化过程日志记录（待实现）
+        场景：语义优化过程日志记录
 
         预期：日志包含原始查询、优化后查询、两次检索结果对比
         """
-        # TODO: 实现后应验证日志格式：
-        # [语义优化] 原始查询: xxx
-        # [语义优化] 优化后查询: xxx
-        # [语义优化] 第一次检索结果数量: x
-        # [语义优化] 第二次检索结果数量: x
-        pass
+        optimizer = AsyncMock()
+        optimizer.optimize.return_value = {
+            "intent": "查找登录相关内容",
+            "cot_plan": ["识别登录主题"],
+            "optimized_query": "登录认证相关资料",
+            "expanded_queries": ["登录认证相关资料"],
+            "see_trace": [{"stage": "intent", "summary": "查找登录相关内容", "metrics": {}}],
+            "fallback_used": False,
+            "fallback_reason": ""
+        }
+
+        with patch("app.routers.rag_optimize.get_query_optimize_service", return_value=optimizer):
+            response = await async_client.post(
+                "/api/v1/rag/test-user/search/optimize",
+                json={"input": "查找登录相关的内容"}
+            )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert "comparison" in data
+        assert "latency_ms" in data["comparison"]
+        assert any(item["stage"] == "comparison" for item in data["see_trace"])
 
 
 # =============================================================================

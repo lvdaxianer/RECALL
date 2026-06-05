@@ -1,0 +1,14 @@
+[
+  {"query": "小程序上线后白屏，本地正常，怎么排查", "issue_type": "fault"},
+  {"query": "接口一直超时并且有告警，如何修复", "issue_type": "fault"},
+  {"query": "这个系统支持哪些门禁能力", "issue_type": "consult"},
+  {"query": "访客预约功能怎么用", "issue_type": "consult"},
+  {"query": "客户反馈工单没有派单，查看处理状态", "issue_type": "ticket"},
+  {"query": "审批工单被驳回的原因是什么", "issue_type": "ticket"},
+  {"query": "门禁权限申请流程有哪些要求", "issue_type": "policy"},
+  {"query": "统一口径里对访客通行有什么限制", "issue_type": "policy"},
+  {"query": "智慧社区门禁和梯控集成方案", "issue_type": "solution"},
+  {"query": "多系统联动架构怎么设计", "issue_type": "solution"},
+  {"query": "常见问题：如何重置门禁密码", "issue_type": "faq"},
+  {"query": "FAQ 里有没有车辆道闸问答", "issue_type": "faq"}
+]

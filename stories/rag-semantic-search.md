@@ -31,8 +31,13 @@
 
 #### 插入时特征提取
 1. 用户插入 description
-2. 同步调用 LLM 提取特征：`{category, tags[]}`
+2. 同步调用 LLM 提取特征：`{category, tags[], entities[], relations[]}`
 3. 特征与向量一起存入 Milvus 和 ES
+
+#### 检索时图检索
+1. 从 query 匹配已索引实体和一跳关系
+2. 返回图检索候选结果
+3. 图检索作为第三路召回参与 RRF 融合
 
 #### 检索时特征加权
 1. 用户设置 `enableFeatureBoost=true`
@@ -87,17 +92,19 @@
 | 自定义数量 | topK=50 | 最多返回 50 条结果 |
 | 阈值过滤 | score < 0.7 | 自动过滤低分结果 |
 
-#### 4. 语义优化（待实现）
+#### 4. 语义优化（已实现）
 | 测试项 | 输入 | 预期结果 |
 |--------|------|----------|
 | 优化查询 | 用户对结果不满意，点击"优化" | 调用大模型，返回优化后查询 |
-| 重新检索 | 优化后的查询文本 | 执行二次检索，返回结果 |
-| 日志记录 | 优化过程 | 记录原始查询、优化后查询、两次结果对比 |
+| 重新检索 | 优化后的查询文本 | 执行多查询二次检索，合并去重后返回结果 |
+| SEE 追踪 | 优化过程 | 返回 intent、cot_plan、see_trace、query_count 和两次结果对比 |
+| 日志记录 | 优化过程 | 记录原始查询、优化后查询、两次结果数量和耗时 |
 
 #### 5. 特征标签（已实现）
 | 测试项 | 输入 | 预期结果 |
 |--------|------|----------|
 | 插入时提取特征 | description="3D飞机飞行模拟" | features.category="模型", features.tags 包含 "3D", "飞机" |
+| 插入时抽取实体关系 | description="JWT 用于登录认证" | features.entities 包含 JWT，features.relations 包含 JWT→登录认证 |
 | 固定规则加权 | enableFeatureBoost=true, 查询"航空模拟" | 命中标签数 × 0.05 加分 |
 | LLM 语义加权 | enableFeatureBoost=true | LLM 返回 relevanceScore 并加权 |
 | 特征返回 | 检索结果 | 返回 features 字段 |
@@ -124,7 +131,7 @@
 | Milvus 连接失败 | /insert, /search | 返回 500 错误，提示服务不可用 |
 | Embedding 超时 | /insert, /search | 返回 500 错误，提示超时 |
 | Rerank 失败 | /search | 降级使用原始向量检索分数 |
-| 大模型失败（待实现） | /search/optimize | 记录日志，返回原始结果 |
+| 大模型失败 | /search/optimize | 记录日志，返回原始结果 |
 
 #### 边界情况
 | 类型 | 测试值 | 预期结果 |
@@ -140,12 +147,12 @@
 | 插入 | Milvus 连接断开 | 返回 500 错误 |
 | 检索 | Embedding 服务不可用 | 返回空列表 |
 | Rerank | Rerank API 不可用 | 降级使用原始分数 |
-| 语义优化（待实现） | 大模型 API 不可用 | 记录日志，返回原始结果 |
+| 语义优化 | 大模型 API 不可用 | 记录日志，返回原始结果 |
 
 ### 超时处理
 - Embedding API 超时：30s
 - Rerank API 超时：30s
-- 大模型 API 超时（待实现）：60s
+- 大模型 API 超时：60s
 
 ### 错误恢复机制
 1. 服务调用失败时记录详细日志
@@ -175,7 +182,7 @@
 | 插入失败 | 返回 500 错误码 |
 | 检索失败 | 返回空列表（降级策略） |
 
-### 日志查看（待实现）
+### 日志查看
 | 场景 | 预期体验 |
 |------|----------|
 | 语义优化过程 | 记录：原始查询 → 优化后查询 → 二次检索结果 |
@@ -183,18 +190,37 @@
 
 ## 待实现功能
 
-### 语义优化检索
-1. 用户对检索结果不满意时，触发"优化"操作
-2. 调用大模型 API 丰富/改写查询语义
-3. 使用优化后的查询重新执行检索
-4. 返回优化后的检索结果
-
-### 日志增强
-1. 记录语义优化全流程日志
-2. 支持查看历史优化记录
-3. 日志包含：原始查询、优化后查询、两次检索结果对比
+### LightRAG-lite 后续增强
+1. 将内存图索引持久化为可查询图结构
+2. 将内存评测记录持久化，用于长期 bad case 归因
+3. 增加图检索效果评测和可视化面板
 
 ## 已实现功能
+
+### 语义优化检索（2026-05-31）
+1. **CoT 检索计划摘要**：返回 `intent` 和 `cot_plan`，不暴露完整私有推理链
+2. **SEE 查询过程追踪**：返回 `see_trace`，展示意图识别、原始检索、优化多查询检索和对比指标
+3. **二次检索**：使用优化后的扩展查询重新执行检索并合并去重
+4. **失败降级**：大模型优化失败时使用原始查询并返回 `fallback_used=true`
+5. **历史记录**：支持查看用户语义优化历史
+
+### 检索评测记录（2026-05-31）
+1. **评测记录**：支持记录 query、optimized_query、retrieved_ids 和 human_label
+2. **bad case 归因**：支持 intent_error、recall_miss、rerank_error、generation_error、stale_knowledge、unknown
+3. **用户隔离**：按用户倒序查看最近评测记录
+
+### 实体关系特征（2026-05-31）
+1. **实体抽取**：插入时抽取 `entities`，作为轻量图谱节点基础
+2. **关系抽取**：插入时抽取 `relations`，作为轻量图谱边基础
+3. **失败降级**：抽取失败时保留 category/tags，并返回空实体关系列表
+
+### LightRAG-lite 图检索（2026-05-31）
+1. **内存图索引**：插入时索引文档实体和一跳关系
+2. **图召回**：查询命中实体或关系术语时返回候选文档
+3. **RRF 融合**：图检索作为第三路召回，与向量和 BM25 一起参与融合
+4. **删除一致性**：删除成功后同步清理图索引，避免召回已删除文档
+5. **图索引重建**：支持从 ES 重建内存图索引，缓解服务重启后的冷启动问题
+6. **调试接口**：支持查看图索引统计和单次 query 的图命中解释
 
 ### 特征标签（2026-04-18）
 1. **插入时 LLM 特征提取**：自动从 description 提取 category 和 tags
@@ -208,6 +234,7 @@
 - **插入响应**：新增 `features` 字段
 - **检索请求**：新增 `enableFeatureBoost` 参数（可选，默认 false）
 - **检索响应**：新增 `features` 字段
+- **优化检索响应**：新增 `intent`、`cot_plan`、`see_trace`、`comparison` 字段
 
 ## 测试接口清单
 
@@ -217,6 +244,13 @@
 | 单条插入 | POST | /api/v1/rag/insert | 插入单条数据 |
 | 批量插入 | POST | /api/v1/rag/insert/batch | 批量插入数据 |
 | 语义检索 | POST | /api/v1/rag/search | 执行语义检索 |
+| 语义优化检索 | POST | /api/v1/rag/search/optimize | 执行优化查询和二次检索 |
+| 语义优化历史 | GET | /api/v1/rag/search/optimize/history | 查看优化历史 |
+| 检索评测记录 | POST | /api/v1/rag/evaluation/records | 记录检索效果和 bad case 归因 |
+| 检索评测列表 | GET | /api/v1/rag/evaluation/records | 查看评测记录 |
+| 图索引统计 | GET | /api/v1/rag/graph/stats | 查看内存图索引规模 |
+| 图索引重建 | POST | /api/v1/rag/graph/rebuild | 从 ES 重建内存图索引 |
+| 图检索解释 | GET | /api/v1/rag/graph/explain | 查看 query 的实体/关系命中 |
 | 删除 | DELETE | /api/v1/rag/delete | 删除记录 |
 
 ---

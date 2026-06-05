@@ -8,7 +8,7 @@ LLM 服务模块
 @date 2026-04-15
 """
 
-from typing import List, Union, Optional, Any, Callable, Dict, Type
+from typing import AsyncIterator, List, Union, Optional, Any, Callable, Dict, Type
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -43,6 +43,7 @@ class LLMService:
         temperature: float = None,
         max_tokens: int = None,
         timeout: int = None,
+        enable_thinking: bool = None,
         streaming: bool = False,
         callbacks: Optional[List[AsyncCallbackHandler]] = None
     ):
@@ -55,6 +56,7 @@ class LLMService:
         @param temperature - 温度参数（默认 0.7）
         @param max_tokens - 最大 token 数（默认 2000）
         @param timeout - 超时时间（秒，默认 60）
+        @param enable_thinking - 是否启用模型思考模式
         @param streaming - 是否启用流式输出
         @param callbacks - LangChain 回调处理器
         """
@@ -64,6 +66,7 @@ class LLMService:
         self.temperature = temperature if temperature is not None else DEFAULT_TEMPERATURE
         self.max_tokens = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
         self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+        self.enable_thinking = enable_thinking if enable_thinking is not None else Config.MODEL_ENABLE_THINKING
         self.streaming = streaming
         self.callbacks = callbacks or []
 
@@ -76,6 +79,7 @@ class LLMService:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.timeout,
+            extra_body={"enable_thinking": self.enable_thinking},
             streaming=self.streaming,
             callbacks=self.callbacks
         )
@@ -126,6 +130,30 @@ class LLMService:
         response = await self.chat(messages, **kwargs)
         return response.content
 
+    async def stream_chat_simple(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        **kwargs
+    ) -> AsyncIterator[str]:
+        """
+        简单流式对话接口。
+
+        @param prompt - 用户输入
+        @param system - 系统提示（可选）
+        @returns 文本增量片段
+        """
+        messages = []
+        if system:
+            messages.append(SystemMessage(content=system))
+        messages.append(HumanMessage(content=prompt))
+        lc_messages = self._convert_messages(messages)
+
+        async for chunk in self._client.astream(lc_messages, **kwargs):
+            content = getattr(chunk, "content", "")
+            if isinstance(content, str) and content:
+                yield content
+
     async def batch_chat(
         self,
         prompts: List[str],
@@ -162,6 +190,7 @@ class LLMService:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.timeout,
+            enable_thinking=self.enable_thinking,
             streaming=self.streaming,
             callbacks=self.callbacks
         )
@@ -185,6 +214,7 @@ class LLMService:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.timeout,
+            enable_thinking=self.enable_thinking,
             streaming=self.streaming,
             callbacks=self.callbacks
         )
@@ -250,6 +280,7 @@ class LLMService:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "timeout": self.timeout,
+            "enable_thinking": self.enable_thinking,
             "streaming": self.streaming
         }
 

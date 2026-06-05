@@ -15,8 +15,7 @@ Milvus 服务测试用例
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import List
+from unittest.mock import MagicMock, patch
 
 
 # =============================================================================
@@ -25,36 +24,67 @@ from typing import List
 
 @pytest.fixture
 def mock_milvus_client():
-    """Mock Milvus 客户端"""
+    """Mock MilvusClient 实例"""
     client = MagicMock()
-    client.connect = AsyncMock(return_value=True)
-    client.disconnect = AsyncMock()
-    client.has_collection = AsyncMock(return_value=True)
-    client.create_collection = AsyncMock(return_value=True)
-    client.insert = AsyncMock(return_value={
-        "ids": ["test-id-1"]
-    })
-    client.search = AsyncMock(return_value=[
-        [["0.85", "0.72"]],
-        [["skill-001", "skill-002"]]
-    ])
-    client.delete = AsyncMock(return_value=True)
+    client.has_collection = MagicMock(return_value=True)
+    client.insert = MagicMock(return_value=MagicMock(insert_count=2))
+    client.search = MagicMock(return_value=[])
+    client.delete = MagicMock(return_value=True)
+    client.flush = MagicMock()
+    client.load_collection = MagicMock()
+    client.create_collection = MagicMock()
+    return client
+
+
+@pytest.fixture
+def mock_milvus_sdk_client():
+    """Mock MilvusClient 实例"""
+    client = MagicMock()
+    client.has_collection = MagicMock(return_value=True)
+    client.create_collection = MagicMock(return_value=None)
+    client.insert = MagicMock(return_value={"insert_count": 2})
+    client.search = MagicMock(return_value=[[]])
+    client.delete = MagicMock(return_value={"delete_count": 1})
+    client.load_collection = MagicMock()
+    client.flush = MagicMock()
     return client
 
 
 @pytest.fixture
 def milvus_service(mock_milvus_client):
     """创建 Milvus 服务实例"""
-    with patch("pymilvus.connections.connect", new_callable=AsyncMock) as mock_connect:
-        from app.services.milvus_service import MilvusService
+    from app.services.milvus_service import MilvusService
+
+    with patch("app.services.milvus_service.MilvusClient", return_value=mock_milvus_client) as mock_client_cls:
         service = MilvusService(
             host="localhost",
             port=19530,
+            username="root",
+            password="root",
             dimension=8192
         )
-        # 替换内部客户端
-        service._client = mock_milvus_client
-        return service
+        service._mock_milvus_client_cls = mock_client_cls
+        service._mock_connections_connect = MagicMock()
+        yield service
+
+
+@pytest.fixture
+def milvus_client_service(mock_milvus_sdk_client):
+    """创建使用 MilvusClient 的服务实例"""
+    from app.services.milvus_service import MilvusService
+
+    with patch("app.services.milvus_service.MilvusClient", return_value=mock_milvus_sdk_client) as mock_client_cls:
+        service = MilvusService(
+            host="localhost",
+            port=19530,
+            username="root",
+            password="root",
+            db="studio",
+            dimension=8192
+        )
+        service._mock_milvus_client_cls = mock_client_cls
+        service._mock_connections_connect = MagicMock()
+        yield service
 
 
 # =============================================================================
@@ -91,7 +121,7 @@ class TestMilvusInsert:
 
         # then: 验证结果
         assert result["id"] == doc_id
-        assert result["collection"] == collection
+        assert result["collection"] == milvus_service._get_full_collection_name(collection)
 
     @pytest.mark.asyncio
     async def test_insert_creates_collection_if_not_exists(self, milvus_service, mock_milvus_client):
@@ -102,7 +132,7 @@ class TestMilvusInsert:
         - 调用 create_collection
         """
         # given: collection 不存在
-        mock_milvus_client.has_collection = AsyncMock(return_value=False)
+        mock_milvus_client.has_collection = MagicMock(return_value=False)
 
         # when: 调用 insert
         await milvus_service.insert(
@@ -136,6 +166,16 @@ class TestMilvusInsert:
                 vector=wrong_vector,
                 metadata={}
             )
+
+
+def test_milvus_search_output_fields_do_not_include_embedding_vector(milvus_service):
+    """Milvus 搜索输出只返回必要字段，不搬运 embedding 向量。"""
+    fields = milvus_service._build_search_output_fields()
+    assert "description" in fields
+    assert "metadata" in fields
+    assert "features" in fields
+    assert "embedding" not in fields
+    assert "vector" not in fields
 
 
 # =============================================================================
@@ -175,6 +215,38 @@ class TestMilvusBatchInsert:
 
         # then: 验证结果
         assert result["inserted_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_insert_preloads_collection_after_write(self, milvus_service, mock_milvus_client):
+        """
+        场景：批量写入新评测 collection 后立即进入查询
+
+        预期：
+        - 写入完成后预热 load collection
+        - 首次 search 不再承担 collection load 长尾
+        """
+        # given: 批量写入数据
+        documents = [
+            {
+                "id": "skill-001",
+                "description": "登录功能",
+                "vector": [0.1] * 8192,
+                "metadata": {"type": "skill"}
+            }
+        ]
+
+        # when: 批量写入
+        await milvus_service.batch_insert("skill", documents)
+
+        # then: 写入后立即预热加载
+        full_collection_name = milvus_service._get_full_collection_name("skill")
+        mock_milvus_client.load_collection.assert_called_once_with(full_collection_name)
+
+        # when: 首次搜索同一个 collection
+        await milvus_service.search("skill", [0.1] * 8192, 20)
+
+        # then: search 复用 loaded 状态，不重复 load
+        mock_milvus_client.load_collection.assert_called_once_with(full_collection_name)
 
     @pytest.mark.asyncio
     async def test_batch_insert_empty_list(self, milvus_service):
@@ -244,6 +316,22 @@ class TestMilvusSearch:
         # then: 验证结果格式
         assert isinstance(results, list)
 
+    def test_parse_stored_dict_does_not_execute_expressions(self):
+        """
+        场景：解析 Milvus 中存储的字典字符串
+
+        预期：
+        - 兼容历史 str(dict) 格式
+        - 不执行表达式
+        """
+        from app.services.milvus_serialization import parse_stored_dict
+
+        parsed = parse_stored_dict("{'type': 'skill', 'id': 'skill-001'}")
+        malicious = parse_stored_dict("__import__('os').system('echo unsafe')")
+
+        assert parsed == {"type": "skill", "id": "skill-001"}
+        assert malicious == {}
+
     @pytest.mark.asyncio
     async def test_search_collection_not_exists(self, milvus_service, mock_milvus_client):
         """
@@ -254,7 +342,7 @@ class TestMilvusSearch:
         - 返回空列表
         """
         # given: collection 不存在
-        mock_milvus_client.has_collection = AsyncMock(return_value=False)
+        mock_milvus_client.has_collection = MagicMock(return_value=False)
 
         # when: 调用 search
         results = await milvus_service.search("new_collection", [0.1] * 8192, 20)
@@ -282,6 +370,144 @@ class TestMilvusSearch:
 
         # then: 验证结果
         assert isinstance(results, list)
+
+    @pytest.mark.asyncio
+    async def test_search_loads_collection_only_once(self, milvus_service, mock_milvus_client):
+        """
+        场景：同一个 collection 连续搜索
+
+        预期：
+        - Collection 只 load 一次，避免重复加载拖慢查询
+        """
+        # when: 连续搜索同一个 collection
+        await milvus_service.search("skill", [0.1] * 8192, 20)
+        await milvus_service.search("skill", [0.1] * 8192, 20)
+
+        # then: 只加载一次
+        mock_milvus_client.load_collection.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_uses_milvus_client_api(self, milvus_client_service, mock_milvus_sdk_client):
+        """
+        场景：使用 MilvusClient 执行搜索
+
+        预期：调用 MilvusClient.search，并解析 dict 格式结果
+        """
+        mock_milvus_sdk_client.search.return_value = [[
+            {
+                "id": "doc-1",
+                "distance": 0.91,
+                "entity": {
+                    "id": "doc-1",
+                    "description": "MilvusClient 搜索结果",
+                    "metadata": '{"type":"skill","id":"doc-1"}',
+                    "features": '{"tags":["milvus"]}',
+                }
+            }
+        ]]
+
+        results = await milvus_client_service.search("skill", [0.1] * 8192, 5)
+
+        mock_milvus_sdk_client.search.assert_called_once()
+        assert results == [
+            {
+                "id": "doc-1",
+                "description": "MilvusClient 搜索结果",
+                "metadata": {"type": "skill", "id": "doc-1"},
+                "features": {"tags": ["milvus"]},
+                "score": 0.91,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_search_uses_metadata_filter_expression(self, milvus_client_service, mock_milvus_sdk_client):
+        """
+        场景：按知识库和文档过滤向量检索
+
+        预期：
+        - Milvus search 使用 metadata like 过滤表达式
+        - 输出字段仍不包含 vector
+        """
+        await milvus_client_service.search(
+            "knowledge_chunk",
+            [0.1] * 8192,
+            5,
+            metadata_filter={"knowledge_base_ids": ["kb-001", "kb-002"], "document_id": "doc-001"},
+        )
+
+        call_kwargs = mock_milvus_sdk_client.search.call_args.kwargs
+        assert 'metadata like "%\\"knowledge_base_id\\":\\"kb-001\\"%"' in call_kwargs["filter"]
+        assert 'metadata like "%\\"knowledge_base_id\\":\\"kb-002\\"%"' in call_kwargs["filter"]
+        assert 'metadata like "%\\"document_id\\":\\"doc-001\\"%"' in call_kwargs["filter"]
+        assert "vector" not in call_kwargs["output_fields"]
+
+    @pytest.mark.asyncio
+    async def test_score_documents_by_ids_uses_batch_id_filter(self, milvus_client_service, mock_milvus_sdk_client):
+        """
+        场景：为融合候选批量校准向量分数
+
+        预期：
+        - 使用 id in 批量过滤，不逐条查询
+        - 不返回 embedding/vector 字段
+        """
+        mock_milvus_sdk_client.search.return_value = [[
+            {
+                "id": "doc-1",
+                "distance": 0.87,
+                "entity": {"id": "doc-1"},
+            },
+            {
+                "id": "doc-2",
+                "distance": 0.65,
+                "entity": {"id": "doc-2"},
+            },
+        ]]
+
+        scores = await milvus_client_service.score_documents_by_ids(
+            collection="skill",
+            query_vector=[0.1] * 8192,
+            doc_ids=["doc-1", "doc-2"],
+        )
+
+        mock_milvus_sdk_client.search.assert_called_once()
+        call_kwargs = mock_milvus_sdk_client.search.call_args.kwargs
+        assert call_kwargs["filter"] == 'id in ["doc-1", "doc-2"]'
+        assert call_kwargs["output_fields"] == ["id"]
+        assert scores == {"doc-1": 0.87, "doc-2": 0.65}
+
+    @pytest.mark.asyncio
+    async def test_search_reconnects_and_retries_once_on_transient_failure(self, milvus_service, mock_milvus_client):
+        """
+        场景：Milvus search 首次遇到瞬时异常
+
+        预期：
+        - 重建客户端连接
+        - 只重试一次
+        - 返回第二次搜索结果
+        """
+        retry_client = MagicMock()
+        retry_client.has_collection = MagicMock(return_value=True)
+        retry_client.load_collection = MagicMock()
+        retry_client.search = MagicMock(return_value=[[
+            {
+                "id": "doc-retry",
+                "distance": 0.92,
+                "entity": {
+                    "id": "doc-retry",
+                    "description": "重试后命中",
+                    "metadata": '{"type":"skill","id":"doc-retry"}',
+                    "features": "{}",
+                }
+            }
+        ]])
+        mock_milvus_client.search.side_effect = RuntimeError("transient timeout")
+
+        with patch("app.services.milvus_service.MilvusClient", return_value=retry_client):
+            results = await milvus_service.search("skill", [0.1] * 8192, 5)
+
+        assert mock_milvus_client.search.call_count == 1
+        retry_client.search.assert_called_once()
+        assert results[0]["id"] == "doc-retry"
 
 
 # =============================================================================
@@ -319,7 +545,7 @@ class TestMilvusDelete:
         - 返回 False
         """
         # given: collection 不存在
-        mock_milvus_client.has_collection = AsyncMock(return_value=False)
+        mock_milvus_client.has_collection = MagicMock(return_value=False)
 
         # when: 调用 delete
         result = await milvus_service.delete("non_existent", "doc-1")
@@ -358,13 +584,45 @@ class TestMilvusHealthCheck:
         - 返回 False
         """
         # given: 连接失败
-        mock_milvus_client.connect = AsyncMock(side_effect=Exception("Connection failed"))
+        mock_milvus_client.has_collection.side_effect = Exception("Connection failed")
 
         # when: 调用 health_check
         result = await milvus_service.health_check()
 
         # then: 验证结果
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_health_check_uses_auth_config(self, milvus_service):
+        """
+        场景：配置 Milvus 账号密码后执行健康检查
+
+        预期：连接参数包含用户和密码
+        """
+        await milvus_service.health_check()
+
+        milvus_service._mock_milvus_client_cls.assert_called_once_with(
+            uri="http://localhost:19530",
+            user="root",
+            password="root"
+        )
+
+    @pytest.mark.asyncio
+    async def test_health_check_uses_milvus_client_without_orm_connection(
+        self,
+        milvus_client_service,
+        mock_milvus_sdk_client
+    ):
+        """
+        场景：执行健康检查
+
+        预期：使用 MilvusClient，不调用 ORM connections.connect
+        """
+        result = await milvus_client_service.health_check()
+
+        assert result is True
+        mock_milvus_sdk_client.has_collection.assert_called()
+        milvus_client_service._mock_connections_connect.assert_not_called()
 
 
 # =============================================================================
@@ -383,7 +641,7 @@ class TestMilvusCollection:
         - 返回 True
         """
         # given: collection 存在
-        mock_milvus_client.has_collection = AsyncMock(return_value=True)
+        mock_milvus_client.has_collection = MagicMock(return_value=True)
 
         # when: 调用 collection_exists
         result = await milvus_service.collection_exists("skill")
@@ -400,7 +658,7 @@ class TestMilvusCollection:
         - 返回 False
         """
         # given: collection 不存在
-        mock_milvus_client.has_collection = AsyncMock(return_value=False)
+        mock_milvus_client.has_collection = MagicMock(return_value=False)
 
         # when: 调用 collection_exists
         result = await milvus_service.collection_exists("non_existent")
@@ -425,6 +683,7 @@ class TestMilvusCollection:
         # then: 验证结果
         assert result is True
         mock_milvus_client.create_collection.assert_called_once()
+        assert not isinstance(mock_milvus_client.create_collection.call_args.kwargs["index_params"], dict)
 
 
 # =============================================================================

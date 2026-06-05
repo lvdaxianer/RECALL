@@ -10,102 +10,28 @@
 import json
 import asyncio
 from typing import List, Dict, Any, Optional
+from app.services.feature_boost_parser import (
+    extract_json,
+    parse_batch_relevance_response,
+    parse_relevance_response,
+)
+from app.services.feature_boost_prompts import (
+    SEMANTIC_BOOST_BATCH_PROMPT,
+    SEMANTIC_BOOST_PROMPT,
+)
 from app.services.llm_service import LLMService, get_llm_service
 from app.utils.logger import get_logger
 
-# 日志器
 feature_boost_logger = get_logger("FeatureBoost")
 
-# 固定加权权重
 FIXED_BOOST_WEIGHT = 0.05  # 每个命中的标签加 0.05 分
 
-# 语义加权配置
 SEMANTIC_CONCURRENCY = 4    # 并发 LLM 调用数量
 SEMANTIC_TIMEOUT = 8         # 单次 LLM 调用超时时间（秒）
 SEMANTIC_MAX_RESULTS = 5     # 最多评估的结果数量（按固定加权排序取 top）
 
-# 语义加权提示词
-SEMANTIC_BOOST_PROMPT = """你是一个语义匹配评估助手。请评估查询与特征标签的语义相关程度。
-
-## 任务
-给定用户查询和一组特征标签，判断它们之间的语义相关程度。
-
-## 输出格式
-必须严格返回以下 JSON 结构：
-{{
-  "relevanceScore": 0.0-1.0之间的浮点数,
-  "reasoning": "简短推理过程，20字以内"
-}}
-
-## 评分规则
-- 1.0：查询与特征完全匹配，意图相同
-- 0.7-0.9：查询与特征高度相关，如同义词或上下位词
-- 0.4-0.6：查询与特征部分相关，涉及同一领域
-- 0.1-0.3：查询与特征微弱相关，勉强有关联
-- 0.0：查询与特征完全不相关
-
-## 示例
-
-查询：航空飞行模拟
-特征：{{"category": "模型", "tags": ["3D", "飞机", "飞行", "模拟"]}}
-输出：{{"relevanceScore": 0.85, "reasoning": "飞机飞行模拟高度相关"}}
-
-查询：web开发教程
-特征：{{"category": "模型", "tags": ["3D", "飞机", "飞行"]}}
-输出：{{"relevanceScore": 0.0, "reasoning": "领域完全不相关"}}
-
-## 待评估
-查询：{query}
-特征：{features}
-
-## 输出
-"""
-
-# 批量语义加权提示词
-SEMANTIC_BOOST_BATCH_PROMPT = """你是一个语义匹配评估助手。请批量评估查询与多个特征标签的语义相关程度。
-
-## 任务
-给定用户查询和 N 个特征标签列表，判断每个特征与查询的语义相关程度。
-
-## 输出格式
-必须严格返回以下 JSON 数组结构，不要包含任何其他内容：
-[
-  {{"index": 0, "relevanceScore": 0.85, "reasoning": "简短推理"}},
-  {{"index": 1, "relevanceScore": 0.20, "reasoning": "简短推理"}}
-]
-
-## 评分规则
-- 1.0：查询与特征完全匹配，意图相同
-- 0.7-0.9：查询与特征高度相关，如同义词或上下位词
-- 0.4-0.6：查询与特征部分相关，涉及同一领域
-- 0.1-0.3：查询与特征微弱相关，勉强有关联
-- 0.0：查询与特征完全不相关
-
-## 示例
-
-查询：航空飞行模拟
-特征列表：
-[
-  {{"id": "it001", "category": "教程", "tags": ["Python", "机器学习"]}},
-  {{"id": "mfg001", "category": "模型", "tags": ["3D", "飞机", "飞行", "模拟"]}}
-]
-输出：[{{"index": 0, "relevanceScore": 0.0, "reasoning": "机器学习与飞行模拟不相关"}}, {{"index": 1, "relevanceScore": 0.85, "reasoning": "飞机飞行模拟高度相关"}}]
-
-## 待评估
-查询：{query}
-特征列表：
-{features_list}
-
-## 输出
-"""
-
-
 class FeatureBoostService:
-    """
-    特征加权服务类
-
-    提供特征过滤和加权功能
-    """
+    """特征加权服务类"""
 
     def __init__(self, llm_service: Optional[LLMService] = None):
         """
@@ -198,6 +124,28 @@ class FeatureBoostService:
 
         return results
 
+    def apply_local_tag_rank_feature(
+        self,
+        query: str,
+        results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """基于查询与 tags 的本地 rank feature 做轻量加权。"""
+        query_text = query or ""
+        boosted = []
+        for result in results:
+            tags = (result.get("features") or {}).get("tags", []) or []
+            matches = [tag for tag in tags if str(tag) and str(tag) in query_text]
+            item = result.copy()
+            if matches:
+                boost = min(0.03 * len(matches), 0.15)
+                item["score"] = float(item.get("score", 0.0) or 0.0) + boost
+                trace = dict(item.get("score_trace") or {})
+                trace["tag_rank_feature"] = round(boost, 6)
+                trace["tag_matches"] = matches
+                item["score_trace"] = trace
+            boosted.append(item)
+        return sorted(boosted, key=lambda item: item.get("score", 0.0), reverse=True)
+
     async def semantic_boost(
         self,
         query: str,
@@ -218,7 +166,6 @@ class FeatureBoostService:
         if not results or not query:
             return results
 
-        # 收集有特征的结果
         results_with_features = []
         for i, result in enumerate(results):
             features = result.get("features", {})
@@ -228,14 +175,12 @@ class FeatureBoostService:
         if not results_with_features:
             return results
 
-        # 按固定加权分数排序，取 top N
         results_with_features.sort(
             key=lambda x: x[1].get("_fixed_boost", 0),
             reverse=True
         )
         top_results = results_with_features[:SEMANTIC_MAX_RESULTS]
 
-        # 创建信号量控制并发数
         semaphore = asyncio.Semaphore(SEMANTIC_CONCURRENCY)
 
         async def evaluate_with_semaphore(
@@ -264,14 +209,12 @@ class FeatureBoostService:
                     )
                     return (idx, result, None)
 
-        # 并发执行 top N 评估
         tasks = [
             evaluate_with_semaphore(idx, result, features)
             for idx, result, features in top_results
         ]
         eval_results = await asyncio.gather(*tasks)
 
-        # 应用评估结果
         success_count = 0
         for idx, result, score in eval_results:
             if score is not None:
@@ -300,17 +243,13 @@ class FeatureBoostService:
         @returns 语义相关分数，失败返回 None
         """
         try:
-            # 构建提示词
             prompt = SEMANTIC_BOOST_PROMPT.format(
                 query=query,
                 features=json.dumps(features, ensure_ascii=False)
             )
 
-            # 调用 LLM
             response = await self.llm_service.chat_simple(prompt)
-
-            # 解析响应
-            return self._parse_relevance_response(response)
+            return parse_relevance_response(response)
 
         except Exception as e:
             feature_boost_logger.error("[语义评估] 评估失败: {}", str(e))
@@ -329,113 +268,33 @@ class FeatureBoostService:
         @returns 语义相关分数列表，失败返回全 None
         """
         try:
-            # 构建批量提示词
             prompt = SEMANTIC_BOOST_BATCH_PROMPT.format(
                 query=query,
                 features_list=json.dumps(features_list, ensure_ascii=False)
             )
 
-            # 一次 LLM 调用
             response = await self.llm_service.chat_simple(prompt)
-
-            # 解析响应
-            return self._parse_batch_relevance_response(response, len(features_list))
+            return parse_batch_relevance_response(response, len(features_list))
 
         except Exception as e:
             feature_boost_logger.error("[批量语义评估] 批量评估失败: {}", str(e))
             return [None] * len(features_list)
 
     def _parse_relevance_response(self, response: str) -> Optional[float]:
-        """
-        解析 LLM 语义评估响应
-
-        @param response - LLM 原始响应
-        @returns 相关分数，解析失败返回 None
-        """
-        try:
-            # 提取 JSON
-            json_str = self._extract_json(response)
-            if json_str:
-                data = json.loads(json_str)
-                score = data.get("relevanceScore")
-                if score is not None:
-                    # 确保分数在 0-1 范围内
-                    return max(0.0, min(1.0, float(score)))
-
-        except Exception as e:
-            feature_boost_logger.error("[语义评估] JSON 解析失败: {}", str(e))
-
-        return None
+        """解析 LLM 语义评估响应"""
+        return parse_relevance_response(response)
 
     def _parse_batch_relevance_response(
         self,
         response: str,
         expected_count: int
     ) -> List[Optional[float]]:
-        """
-        解析 LLM 批量语义评估响应
-
-        @param response - LLM 原始响应
-        @param expected_count - 期望的结果数量
-        @returns 相关分数列表，解析失败返回全 None
-        """
-        try:
-            # 提取 JSON 数组
-            json_str = self._extract_json(response)
-            if json_str:
-                data = json.loads(json_str)
-                if isinstance(data, list):
-                    # 按 index 排序
-                    sorted_data = sorted(data, key=lambda x: x.get("index", 0))
-                    scores = []
-                    for item in sorted_data:
-                        score = item.get("relevanceScore")
-                        if score is not None:
-                            scores.append(max(0.0, min(1.0, float(score))))
-                        else:
-                            scores.append(None)
-                    # 确保返回数量一致
-                    if len(scores) >= expected_count:
-                        return scores[:expected_count]
-                    else:
-                        return scores + [None] * (expected_count - len(scores))
-
-        except Exception as e:
-            feature_boost_logger.error("[批量语义评估] JSON 解析失败: {}", str(e))
-
-        return [None] * expected_count
+        """解析 LLM 批量语义评估响应"""
+        return parse_batch_relevance_response(response, expected_count)
 
     def _extract_json(self, text: str) -> Optional[str]:
-        """
-        从文本中提取 JSON 字符串
-
-        @param text - 原始文本
-        @returns JSON 字符串
-        """
-        try:
-            json.loads(text)
-            return text
-        except Exception:
-            pass
-
-        import re
-        patterns = [
-            r'```json\s*(\{.*?\})\s*```',
-            r'```\s*(\{.*?\})\s*```',
-            r'(\{.*\})'
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                potential_json = match.group(1)
-                try:
-                    json.loads(potential_json)
-                    return potential_json
-                except Exception:
-                    continue
-
-        return None
+        """从文本中提取 JSON 字符串"""
+        return extract_json(text)
 
     async def boost(
         self,
@@ -487,7 +346,6 @@ class FeatureBoostService:
             return False
 
 
-# 全局单例
 _feature_boost_service: Optional[FeatureBoostService] = None
 
 

@@ -1,8 +1,6 @@
 """
 高精度 RAG 问答路由
 
-串联查询理解层 → 混合检索层 → 重排序层 → 生成层 → 验证层
-
 @author lvdaxianerplus
 @date 2026-05-25
 """
@@ -17,7 +15,6 @@ from app.query.hyde import get_hyde
 from app.query.decomposer import get_query_decomposer
 from app.generation.context_compressor import get_context_compressor
 from app.generation.generator import get_generator
-from app.generation.citation_builder import build_citation_list
 from app.validation.hallucination_filter import get_hallucination_filter
 from app.services.embedding_service import EmbeddingService
 from app.services.milvus_service import MilvusService
