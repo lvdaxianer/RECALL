@@ -1,0 +1,192 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   Recall · shadcn / Tailwind 4 token (v1.1 · emerald)
+   业务颜色走 theme.css；本文件只承担 shadcn 的 hex 颜色与 reset。
+   注意：必须是 hex，不能是裸 RGB（浏览器会判定 border-color 无效并回落 currentColor）。
+   ============================================================ */
+:root {
+  --background: #F7F8FA;
+  --foreground: #0F172A;
+  --card: #FFFFFF;
+  --card-foreground: #0F172A;
+  --popover: #FFFFFF;
+  --popover-foreground: #0F172A;
+  --primary: #059669;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F1F3F7;
+  --secondary-foreground: #0F172A;
+  --muted: #F1F3F7;
+  --muted-foreground: #475569;
+  /* v1.4: --accent 改 emerald，避免 shadcn CommandItem/Button 用到 indigo 出现紫。 */
+  --accent: #ECFDF5;
+  --accent-foreground: #047857;
+  --destructive: #DC2626;
+  --destructive-foreground: #FFFFFF;
+  --border: #E4E7EC;
+  --input: #CDD2DA;
+  --ring: #059669;
+  --radius: 0.5rem;
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #0F172A;
+  --sidebar-primary: #059669;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #ECFDF5;
+  --sidebar-accent-foreground: #059669;
+  --sidebar-border: #E4E7EC;
+  --sidebar-ring: #059669;
+}
+
+/* ============================================================ Reset */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  font: inherit;
+}
+
+/* ============================================================ 全局焦点环 */
+/* 覆盖浏览器默认的蓝/紫 outline；统一用 emerald-500。 */
+*:focus {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: 2px solid #059669;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 表单元素（input/select/textarea）走 Tailwind 的 ring 系统（emerald-500），
+   这里只处理 outline 兜底。 */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="link"]:focus-visible,
+[role="option"]:focus-visible {
+  outline: 2px solid #059669;
+  outline-offset: 2px;
+}
+
+/* native select 的 dropdown 是浏览器 native UI，受 OS 主题控制；
+   这里只控制 closed 状态。 */
+select {
+  background-color: #ffffff;
+}
+
+/* Chromium 86+ 的 form 元素 accent 颜色，匹配品牌 */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: #059669;
+}
+
+/* 高亮选中文字用品牌色 */
+::selection {
+  background-color: #ECFDF5;
+  color: #0F172A;
+}
+
+/* ============================================================ 工具类 */
+
+/* 数字 / chunk id / score 用 mono，启用 tabular-nums 等宽对齐。 */
+.mono,
+code {
+  font-family:
+    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+    SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 键盘键帽（⌘K 等快捷键提示） */
+kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 3px;
+  color: var(--color-muted);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ============================================================ 暗色 token（预留，本期不启用） */
+.dark {
+  --sidebar: hsl(240 5.9% 10%);
+  --sidebar-foreground: hsl(240 4.8% 95.9%);
+  --sidebar-primary: hsl(166 76% 48%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(240 3.7% 15.9%);
+  --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
+  --sidebar-border: hsl(240 3.7% 15.9%);
+  --sidebar-ring: hsl(166 76% 48%);
+}
+
+@theme inline {
+  /* shadcn / Tailwind 4：把 :root 里的 RGB 变量映射成 Tailwind utility */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}

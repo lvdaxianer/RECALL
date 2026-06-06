@@ -8,7 +8,7 @@ Embedding 服务模块
 """
 
 import httpx
-from typing import List, Union, Optional
+from typing import List, Union
 from app.config import Config
 from app.utils.logger import embedding_logger
 from app.services.cache_service import get_cache_service
@@ -40,6 +40,7 @@ class EmbeddingService:
         self.dimension = dimension or Config.EMBEDDING_DIMENSION
         self.use_cache = use_cache
         self._cache = None  # 懒加载
+        self._client = None  # 懒加载，复用连接池
 
     @property
     def cache(self):
@@ -48,6 +49,19 @@ class EmbeddingService:
             self._cache = get_cache_service()
         return self._cache
 
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """懒加载 HTTP 客户端，复用连接池降低模型调用延迟"""
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        """关闭 HTTP 客户端连接池"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     async def encode(self, texts: Union[str, List[str]]) -> List[float]:
         """
         将文本转换为向量（支持缓存）
@@ -55,8 +69,11 @@ class EmbeddingService:
         @param texts - 单个文本或文本列表
         @returns 向量列表
         """
-        if isinstance(texts, str):
+        is_single_text = isinstance(texts, str)
+        if is_single_text:
             texts = [texts]
+        if not texts or any(not text or not text.strip() for text in texts):
+            raise ValueError("文本不能为空")
 
         # 单文本查询优先检查缓存
         if self.use_cache and len(texts) == 1:
@@ -67,28 +84,28 @@ class EmbeddingService:
 
         # 调用 API
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.request_url,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={
-                        "model": self.model_name,
-                        "input": texts,
-                        "dimensions": self.dimension  # 指定返回维度
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
+            response = await self.client.post(
+                self.request_url,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model_name,
+                    "input": texts,
+                    "dimensions": self.dimension  # 指定返回维度
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
 
-                embeddings = result["data"][0]["embedding"]
-                embedding_logger.info("[Embedding] 向量化完成, 向量维度={}", len(embeddings))
+            embeddings = [item["embedding"] for item in result["data"]]
+            first_embedding = embeddings[0] if embeddings else []
+            embedding_logger.info("[Embedding] 向量化完成, 向量维度={}", len(first_embedding))
 
-                # 缓存单文本结果
-                if self.use_cache and len(texts) == 1:
-                    self.cache.set_embedding(texts[0], embeddings)
+            # 缓存单文本结果
+            if self.use_cache and len(texts) == 1:
+                self.cache.set_embedding(texts[0], first_embedding)
 
-                return embeddings
+            return first_embedding if is_single_text else embeddings
 
         except httpx.HTTPError as e:
             embedding_logger.error("[Embedding] HTTP 错误, error={}", str(e))

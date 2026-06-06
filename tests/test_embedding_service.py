@@ -15,6 +15,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
+from app.config import Config
+
 
 # =============================================================================
 # Fixtures
@@ -24,14 +26,14 @@ import httpx
 def mock_http_client():
     """Mock HTTP 客户端"""
     client = AsyncMock(spec=httpx.AsyncClient)
-    client.post = AsyncMock(return_value=AsyncMock(
-        status_code=200,
-        json=AsyncMock(return_value={
-            "data": [{
-                "embedding": [0.1] * 8192
-            }]
-        })
-    ))
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "data": [{
+            "embedding": [0.1] * 8192
+        }]
+    }
+    response.raise_for_status = MagicMock()
+    client.post = AsyncMock(return_value=response)
     return client
 
 
@@ -44,9 +46,10 @@ def embedding_service(mock_http_client):
             api_key="test_key",
             request_url="https://api.test.com/v1/embeddings",
             model_name="test-model",
-            dimension=8192
+            dimension=8192,
+            use_cache=False
         )
-        return service
+        yield service
 
 
 # =============================================================================
@@ -87,6 +90,16 @@ class TestEmbeddingEncode:
         """
         # given: 多文本输入
         texts = ["用户登录功能", "用户注册功能", "密码找回"]
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "data": [
+                {"embedding": [0.1] * 8192},
+                {"embedding": [0.2] * 8192},
+                {"embedding": [0.3] * 8192}
+            ]
+        }
+        response.raise_for_status = MagicMock()
+        mock_http_client.post = AsyncMock(return_value=response)
 
         # when: 调用 encode
         result = await embedding_service.encode(texts)
@@ -138,14 +151,41 @@ class TestEmbeddingEncode:
         - 记录 ERROR 日志
         """
         # given: API 错误响应
-        error_response = AsyncMock()
+        error_response = MagicMock()
         error_response.status_code = 500
-        error_response.json = AsyncMock(return_value={"error": "Internal error"})
+        error_response.json.return_value = {"error": "Internal error"}
+        error_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Internal error",
+            request=MagicMock(),
+            response=error_response
+        )
         mock_http_client.post = AsyncMock(return_value=error_response)
 
         # when/then: 调用 encode
         with pytest.raises(Exception):
             await embedding_service.encode("test text")
+
+    @pytest.mark.asyncio
+    async def test_encode_reuses_http_client_between_calls(self, embedding_service, mock_http_client):
+        """
+        场景：连续多次调用 Embedding
+
+        预期：
+        - 复用同一个 HTTP 客户端连接池
+        - 避免每次查询都重新创建连接
+        """
+        # given: 两次正常响应
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"data": [{"embedding": [0.1] * 8192}]}
+        response.raise_for_status = MagicMock()
+        mock_http_client.post = AsyncMock(return_value=response)
+
+        # when: 连续调用 encode
+        await embedding_service.encode("第一次查询")
+        await embedding_service.encode("第二次查询")
+
+        # then: 只初始化一次 AsyncClient，并复用 post
+        assert mock_http_client.post.await_count == 2
 
 
 # =============================================================================
@@ -164,10 +204,10 @@ class TestEmbeddingHealthCheck:
         - 返回 True
         """
         # given: 正常响应
-        mock_http_client.post = AsyncMock(return_value=AsyncMock(
-            status_code=200,
-            json=AsyncMock(return_value={"data": [{"embedding": [0.1] * 128}]})
-        ))
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"data": [{"embedding": [0.1] * 128}]}
+        response.raise_for_status = MagicMock()
+        mock_http_client.post = AsyncMock(return_value=response)
 
         # when: 调用 health_check
         result = await embedding_service.health_check()
@@ -207,13 +247,11 @@ class TestEmbeddingConfig:
         预期：
         - 配置正确加载
         """
-        # given: 设置环境变量
-        with patch.dict("os.environ", {
-            "EMBEDDING_MODEL_NAME": "test-model",
-            "EMBEDDING_MODEL_API_KEY": "test_key",
-            "EMBEDDING_REQUEST_URL": "https://api.test.com/v1/embeddings",
-            "EMBEDDING_DIMENSION": "8192"
-        }):
+        # given: 设置配置
+        with patch.object(Config, "EMBEDDING_MODEL_NAME", "test-model"), \
+             patch.object(Config, "EMBEDDING_MODEL_API_KEY", "test_key"), \
+             patch.object(Config, "EMBEDDING_REQUEST_URL", "https://api.test.com/v1/embeddings"), \
+             patch.object(Config, "EMBEDDING_DIMENSION", 8192):
             from app.services.embedding_service import EmbeddingService
             service = EmbeddingService()
 
@@ -228,8 +266,8 @@ class TestEmbeddingConfig:
         预期：
         - dimension 默认 8192
         """
-        # given: 未设置维度
-        with patch.dict("os.environ", {}, clear=True):
+        # given: 默认配置维度
+        with patch.object(Config, "EMBEDDING_DIMENSION", 8192):
             from app.services.embedding_service import EmbeddingService
             service = EmbeddingService(
                 api_key="test",
