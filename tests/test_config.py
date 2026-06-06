@@ -68,6 +68,20 @@ def test_recommendation_top_k_defaults_to_three():
     assert Config.RAG_RECOMMENDATION_TOP_K == 3
 
 
+def test_recommendation_timeout_defaults_to_small_budget():
+    """推荐生成默认使用很小的独立超时预算，避免拖慢主回答。"""
+    from app.config import Config
+
+    assert 50 <= Config.RAG_RECOMMENDATION_TIMEOUT_MS <= 250
+
+
+def test_stream_delta_delay_is_configurable():
+    """流式答案 delta pacing 使用配置项控制。"""
+    from app.config import Config
+
+    assert 0.0 <= Config.STREAM_DELTA_DELAY_SECONDS <= 0.1
+
+
 def test_ragflow_inspired_retrieval_defaults_are_safe():
     """RAGFlow-inspired 检索策略默认保持现有 RRF 主路径"""
     from app.config import Config

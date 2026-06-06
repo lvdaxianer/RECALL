@@ -138,6 +138,26 @@ async def test_create_agent_session_ensures_runtime_profile(async_client, app_ro
 
 
 @pytest.mark.asyncio
+async def test_update_agent_session_title(async_client):
+    """Agent session 支持手动改名。"""
+    session_response = await async_client.post(
+        "/api/v1/agent/u001/sessions",
+        json={"title": "新的检索会话", "runtime": "local"},
+    )
+    session_id = session_response.json()["data"]["session_id"]
+
+    response = await async_client.patch(
+        f"/api/v1/agent/u001/sessions/{session_id}",
+        json={"title": "小程序白屏排查"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["title"] == "小程序白屏排查"
+    assert data["metadata"]["title_source"] == "manual"
+
+
+@pytest.mark.asyncio
 async def test_runtime_health_stop_and_cleanup(async_client):
     session_response = await async_client.post(
         "/api/v1/agent/u001/sessions",

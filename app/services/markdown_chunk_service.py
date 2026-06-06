@@ -116,13 +116,15 @@ class MarkdownChunkService:
         if self.overlap <= 0:
             return [{**chunk, "indexed_content": chunk["content"]} for chunk in chunks]
         indexed_chunks = []
-        previous_content = ""
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
             content = chunk["content"].strip()
+            previous_content = chunks[index - 1]["content"].strip() if index > 0 else ""
+            next_content = chunks[index + 1]["content"].strip() if index + 1 < len(chunks) else ""
             prefix = previous_content[-self.overlap:].strip()
-            indexed_content = f"{prefix}\n{content}".strip() if prefix else content
+            suffix = next_content[:self.overlap].strip()
+            parts = [part for part in [prefix, content, suffix] if part]
+            indexed_content = "\n".join(parts).strip()
             indexed_chunks.append({**chunk, "indexed_content": indexed_content})
-            previous_content = content
         return indexed_chunks
 
     def _split_long_text(self, text: str) -> list[str]:

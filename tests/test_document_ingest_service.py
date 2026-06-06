@@ -21,6 +21,22 @@ class FakeEmbeddingService:
         return [0.1, 0.2, 0.3]
 
 
+class RecordingEmbeddingService:
+    """记录每次批量向量化的输入数量。"""
+
+    def __init__(self):
+        """初始化调用记录。"""
+        self.batch_sizes = []
+
+    async def encode(self, texts):
+        """记录批大小并返回固定向量。"""
+        if isinstance(texts, list):
+            self.batch_sizes.append(len(texts))
+            return [[0.1, 0.2, 0.3] for _ in texts]
+        self.batch_sizes.append(1)
+        return [0.1, 0.2, 0.3]
+
+
 class BrokenEmbeddingService:
     """测试用失败 Embedding 服务。"""
 
@@ -70,6 +86,30 @@ class RecordingPlanner:
         if self.should_fail:
             raise RuntimeError("planner failed")
         return self.plan_payload
+
+
+class FakeTaxonomyExtractor:
+    """测试用主题抽取器。"""
+
+    def __init__(self):
+        """记录调用次数。"""
+        self.calls = 0
+
+    async def extract(self, title, content, existing_tags=None):
+        """返回固定主题结构。"""
+        from app.models.knowledge_base_schemas import DocumentTopicExtractionResult
+
+        self.calls += 1
+        return DocumentTopicExtractionResult(
+            primary_topic="适配器模式",
+            parent_topics=["结构型模式", "设计模式"],
+            sibling_topics=["装饰器模式"],
+            child_topics=["Java 适配器模式实现"],
+            topic_aliases=["Adapter Pattern", "适配器"],
+            topic_path=["Java", "设计模式", "结构型模式", "适配器模式"],
+            confidence=0.92,
+            evidence=["标题命中"],
+        )
 
 
 def test_document_ingest_returns_status_chunk_count_and_doc_id(tmp_path):
@@ -173,6 +213,86 @@ async def test_parse_queued_document_indexes_and_updates_status(tmp_path):
     assert parsed["chunk_count"] == 1
     assert chunks[0]["content"] == "内容"
     assert es_service.documents[0]["metadata"]["document_id"] == queued["id"]
+
+
+@pytest.mark.asyncio
+async def test_parse_queued_document_persists_taxonomy_and_indexes_topic_fields(tmp_path):
+    """解析 queued 文档后应持久化主题树，并把主题字段写入检索索引。"""
+    repository = KnowledgeBaseRepository(str(tmp_path / "kb.sqlite"))
+    kb = repository.create_knowledge_base("技术知识库", "研发文档", "user-001")
+    queued = repository.enqueue_document(
+        kb["id"],
+        "adapter.md",
+        "text/markdown",
+        "user-001",
+        "# 适配器模式\n## Java 示例\n正文",
+        "adapter.md",
+    )
+    claimed = repository.claim_queued_documents(1)[0]
+    es_service = FakeESService()
+    milvus_service = FakeMilvusService()
+    taxonomy_extractor = FakeTaxonomyExtractor()
+    service = DocumentIngestService(
+        repository=repository,
+        chunk_service=MarkdownChunkService(max_chars=120, overlap=20),
+        embedding_service=FakeEmbeddingService(),
+        es_service=es_service,
+        milvus_service=milvus_service,
+        taxonomy_extractor=taxonomy_extractor,
+    )
+
+    parsed = await service.parse_queued_document(claimed)
+
+    topics = repository.get_document_topics(kb["id"], queued["id"])
+    indexed = es_service.documents[0]
+    assert parsed["parse_status"] == "indexed"
+    assert taxonomy_extractor.calls == 1
+    assert topics["primary_topic"] == "适配器模式"
+    assert indexed["metadata"]["primary_topic"] == "适配器模式"
+    assert indexed["metadata"]["topic_path"] == ["Java", "设计模式", "结构型模式", "适配器模式"]
+    assert indexed["features"]["topic_aliases"] == ["Adapter Pattern", "适配器"]
+
+
+@pytest.mark.asyncio
+async def test_document_ingest_batches_embedding_requests_for_large_documents(tmp_path, monkeypatch):
+    """长文档索引应分批调用 Embedding，避免单次请求过大。"""
+    repository = KnowledgeBaseRepository(str(tmp_path / "kb.sqlite"))
+    kb = repository.create_knowledge_base("技术知识库", "研发文档", "user-001")
+    embedding_service = RecordingEmbeddingService()
+    es_service = FakeESService()
+    milvus_service = FakeMilvusService()
+    service = DocumentIngestService(
+        repository=repository,
+        chunk_service=MarkdownChunkService(max_chars=120, overlap=20),
+        embedding_service=embedding_service,
+        es_service=es_service,
+        milvus_service=milvus_service,
+    )
+    document = repository.upsert_document(
+        knowledge_base_id=kb["id"],
+        document_name="large.md",
+        content_type="text/markdown",
+        owner_id="user-001",
+        chunk_count=9,
+    )
+    chunks = [
+        {
+            "id": f"chunk-{index}",
+            "knowledge_base_id": kb["id"],
+            "document_id": document["id"],
+            "chunk_index": index,
+            "title": "",
+            "content": f"内容 {index}",
+        }
+        for index in range(9)
+    ]
+    monkeypatch.setattr("app.config.Config.KNOWLEDGE_BASE_EMBEDDING_BATCH_SIZE", 4)
+
+    await service._index_chunks(document, chunks)
+
+    assert embedding_service.batch_sizes == [4, 4, 1]
+    assert len(es_service.documents) == 9
+    assert len(milvus_service.documents) == 9
 
 
 @pytest.mark.asyncio

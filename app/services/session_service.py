@@ -91,6 +91,28 @@ class SessionService:
                 reverse=True,
             )
 
+    def update_session_title(
+        self,
+        user_id: str,
+        session_id: str,
+        title: str,
+        source: str = "manual",
+    ) -> AgentSession:
+        """更新会话标题，并记录标题来源。"""
+        session = self.get_session(user_id, session_id)
+        data = session.model_dump()
+        metadata = dict(data.get("metadata") or {})
+        metadata["title_source"] = source
+        data["title"] = title.strip()
+        data["metadata"] = metadata
+        data["updated_at"] = _now_iso()
+        updated = AgentSession(**data)
+        if self.repository is not None:
+            self.repository.save_session(updated)
+        else:
+            self._sessions[self._session_key(user_id, session_id)] = updated
+        return updated
+
     def create_run(
         self,
         user_id: str,

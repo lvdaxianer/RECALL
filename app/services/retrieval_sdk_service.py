@@ -9,6 +9,7 @@ Date: 2026-06-03
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 import asyncio
@@ -20,6 +21,7 @@ from app.services.es_service import get_es_service
 from app.services.issue_filter_service import IssueFilterService
 from app.services.issue_routing_service import IssueRoutingService
 from app.services.knowledge_base_repository import KnowledgeBaseRepository
+from app.services.llm_service import get_llm_service
 from app.services.milvus_service import MilvusService
 from app.services.query_scope_service import QueryScopeService
 from app.services.rerank_service import RerankService
@@ -35,6 +37,26 @@ CONFIDENT_LOCAL_MIN_SIGNAL = 3
 CONFIDENT_LOCAL_MIN_GAP = 2.0
 CONTEXT_QUERY_MAX_CHARS = 300
 CONTEXT_HISTORY_LIMIT = 3
+DEEP_SEARCH_MAX_SUB_QUERIES = 3
+DEEP_SEARCH_TOP_HITS = 3
+DEEP_SEARCH_PROMPT = """
+请把用户问题拆成适合知识库 DeepSearch 的公开检索计划。
+
+要求：
+1. 只输出 JSON，不要输出解释文字。
+2. sub_questions 最多 3 个，每个都要是可直接检索的问题。
+3. cot_plan 只能写公开检索计划摘要，不要输出完整私有推理链。
+4. 不要编造事实。
+
+用户问题：{query}
+
+JSON 格式：
+{{
+  "intent": "...",
+  "cot_plan": ["...", "..."],
+  "sub_questions": ["...", "..."]
+}}
+"""
 
 
 class RetrievalSDKService:
@@ -58,6 +80,7 @@ class RetrievalSDKService:
         self.rerank_service = rerank_service
         self.issue_routing_service = IssueRoutingService()
         self.issue_filter_service = IssueFilterService()
+        self._llm_service = None
 
     def search(
         self,
@@ -195,6 +218,99 @@ class RetrievalSDKService:
             ))
             return fallback
 
+    async def deep_search_with_engines(
+        self,
+        input: str,
+        knowledge_base_ids: list[str],
+        top_k: int = 10,
+        request_id: str | None = None,
+        issue_type: str | None = None,
+    ) -> dict[str, Any]:
+        """执行 DeepSearch：公开计划拆分、多路检索、合并重排。"""
+        request_id = request_id or f"req_{uuid.uuid4().hex}"
+        plan = await self._build_deep_search_plan(input)
+        steps = []
+        merged: dict[str, dict[str, Any]] = {}
+        for index, sub_question in enumerate(plan["sub_questions"], start=1):
+            result = await self.search_with_engines(
+                input=sub_question,
+                knowledge_base_ids=knowledge_base_ids,
+                top_k=top_k,
+                request_id=request_id,
+                issue_type=issue_type,
+            )
+            hits = list(result.get("results") or [])
+            steps.append({
+                "index": index,
+                "sub_question": sub_question,
+                "hit_count": len(hits),
+                "top_hits": _deep_search_top_hits(hits),
+            })
+            for hit in hits:
+                chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
+                if not chunk_id:
+                    continue
+                current = merged.get(chunk_id)
+                if current is None or float(hit.get("score", 0)) > float(current.get("score", 0)):
+                    merged[chunk_id] = hit
+        candidates = sorted(merged.values(), key=lambda item: float(item.get("score", 0)), reverse=True)
+        results = await self._rerank_candidates(input, candidates, top_k, request_id) if candidates else []
+        scope_result = self.scope_service.detect(input)
+        issue_route, issue_filters = self._build_issue_context(input, issue_type)
+        trace = self._build_engine_trace(scope_result, issue_route, issue_filters, results, knowledge_base_ids, input)
+        trace.append(build_stage_summary(
+            stage="deep_search_merge",
+            summary="已合并子问题命中，并基于原始问题重新排序",
+            metrics={
+                "sub_query_count": len(plan["sub_questions"]),
+                "merged_candidate_count": len(candidates),
+                "engine": "deep_search",
+            },
+        ))
+        return {
+            "request_id": request_id,
+            "query_scope": scope_result["query_scope"],
+            "route_plan": scope_result["route_plan"],
+            "issue_type": issue_route["issue_type"],
+            "issue_route": issue_route,
+            "issue_filters": issue_filters,
+            "filters": _build_sdk_filters(knowledge_base_ids, issue_filters),
+            "results": results,
+            "trace": trace,
+            "deep_search": {
+                "intent": plan["intent"],
+                "cot_plan": plan["cot_plan"],
+                "sub_questions": plan["sub_questions"],
+                "steps": steps,
+            },
+        }
+
+    async def _build_deep_search_plan(self, query: str) -> dict[str, Any]:
+        """构建公开 DeepSearch 检索计划，失败时降级到规则拆分。"""
+        try:
+            response = await self._get_llm_service().chat_simple(
+                DEEP_SEARCH_PROMPT.format(query=query),
+                system="你是 Recall 的 DeepSearch 检索规划器，只输出 JSON。",
+                temperature=0.2,
+            )
+            data = _extract_json_object(response)
+            intent = str(data.get("intent") or query).strip()[:120]
+            cot_plan = _clean_string_list(data.get("cot_plan"), limit=4)
+            sub_questions = _clean_string_list(data.get("sub_questions"), limit=DEEP_SEARCH_MAX_SUB_QUERIES)
+            if sub_questions:
+                return {
+                    "intent": intent or query[:80],
+                    "cot_plan": cot_plan or _fallback_cot_plan(query),
+                    "sub_questions": sub_questions,
+                }
+        except Exception:
+            pass
+        return {
+            "intent": query.strip()[:80],
+            "cot_plan": _fallback_cot_plan(query),
+            "sub_questions": _fallback_sub_questions(query),
+        }
+
     async def _retrieve_engine_candidates(
         self,
         query: str,
@@ -315,6 +431,12 @@ class RetrievalSDKService:
             self.rerank_service = RerankService()
         return self.rerank_service
 
+    def _get_llm_service(self):
+        """获取 LLM 服务。"""
+        if self._llm_service is None:
+            self._llm_service = get_llm_service()
+        return self._llm_service
+
     def _score_candidates(
         self,
         query: str,
@@ -349,7 +471,8 @@ class RetrievalSDKService:
 
     def _score_chunk(self, chunk: dict[str, Any], query_terms: set[str]) -> dict[str, Any]:
         """计算单个 chunk 的检索分数。"""
-        content_terms = _tokenize(chunk["content"])
+        indexed_content = chunk.get("indexed_content") or chunk["content"]
+        content_terms = _tokenize(indexed_content)
         title_terms = _tokenize(chunk.get("title", ""))
         document_name_terms = _tokenize(chunk.get("document_name", ""))
         term_overlap = len(query_terms & content_terms)
@@ -364,19 +487,20 @@ class RetrievalSDKService:
             "chunk_index": chunk["chunk_index"],
             "title": chunk.get("title", ""),
             "content": chunk["content"],
-            "description": _candidate_text(chunk.get("title", ""), chunk["content"]),
+            "description": _candidate_text(chunk.get("title", ""), indexed_content),
             "score": round(float(score), 4),
             "score_trace": {
                 "strategy": "local_keyword_overlap",
                 "term_overlap": term_overlap,
                 "title_overlap": title_overlap,
                 "document_name_overlap": document_name_overlap,
-                "content_length": len(chunk["content"]),
+                "content_length": len(indexed_content),
             },
         }
 
     def _score_chunk_title(self, chunk: dict[str, Any], query_terms: set[str]) -> dict[str, Any]:
         """计算标题/文档名轻量分数，不解析正文。"""
+        indexed_content = chunk.get("indexed_content") or chunk["content"]
         title_terms = _tokenize(chunk.get("title", ""))
         document_name_terms = _tokenize(chunk.get("document_name", ""))
         title_overlap = len(query_terms & title_terms)
@@ -390,14 +514,14 @@ class RetrievalSDKService:
             "chunk_index": chunk["chunk_index"],
             "title": chunk.get("title", ""),
             "content": chunk["content"],
-            "description": _candidate_text(chunk.get("title", ""), chunk["content"]),
+            "description": _candidate_text(chunk.get("title", ""), indexed_content),
             "score": round(float(score), 4),
             "score_trace": {
                 "strategy": "local_title_document_name",
                 "term_overlap": 0,
                 "title_overlap": title_overlap,
                 "document_name_overlap": document_name_overlap,
-                "content_length": len(chunk["content"]),
+                "content_length": len(indexed_content),
             },
         }
 
@@ -469,6 +593,68 @@ def _tokenize(text: str) -> set[str]:
                 tokens.update(_char_ngrams(part, 2))
                 tokens.update(_char_ngrams(part, 3))
     return tokens
+
+
+def _extract_json_object(response: str) -> dict[str, Any]:
+    """从 LLM 文本中提取 JSON object。"""
+    text = response.strip()
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        text = text[start:end]
+    data = json.loads(text)
+    return data if isinstance(data, dict) else {}
+
+
+def _clean_string_list(value: Any, limit: int) -> list[str]:
+    """清理 LLM 返回的字符串数组。"""
+    if not isinstance(value, list):
+        return []
+    items = []
+    seen = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text[:160])
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _fallback_cot_plan(query: str) -> list[str]:
+    """构建公开检索计划摘要，不包含私有推理链。"""
+    return [
+        "识别用户问题中的关键实体、现象和约束",
+        "拆分为多个可独立检索的子问题",
+        "分别检索证据后合并排序生成回答",
+    ]
+
+
+def _fallback_sub_questions(query: str) -> list[str]:
+    """无 LLM 时生成保守子问题，保证 DeepSearch 仍可执行。"""
+    normalized = query.strip()
+    if not normalized:
+        return []
+    return [
+        normalized,
+        f"{normalized} 相关原因",
+        f"{normalized} 解决方案",
+    ][:DEEP_SEARCH_MAX_SUB_QUERIES]
+
+
+def _deep_search_top_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """生成可展示的命中摘要，避免泄露完整正文。"""
+    top_hits = []
+    for hit in hits[:DEEP_SEARCH_TOP_HITS]:
+        top_hits.append({
+            "chunk_id": hit.get("chunk_id", hit.get("id", "")),
+            "document_name": hit.get("document_name", ""),
+            "title": hit.get("title", ""),
+            "score": hit.get("score", 0),
+        })
+    return top_hits
 
 
 def _contains_cjk(text: str) -> bool:

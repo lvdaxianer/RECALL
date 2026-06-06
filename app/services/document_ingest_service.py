@@ -17,6 +17,7 @@ from app.services.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.markdown_chunk_service import MarkdownChunkService
 from app.services.milvus_service import MilvusService
 from app.services.semantic_chunk_planning_service import SemanticChunkPlanningService
+from app.services.taxonomy_extraction_service import TaxonomyExtractionService
 from app.utils.logger import rag_search_logger
 
 
@@ -31,6 +32,7 @@ class DocumentIngestService:
         es_service: Any | None = None,
         milvus_service: Any | None = None,
         semantic_planner: Any | None = None,
+        taxonomy_extractor: Any | None = None,
     ):
         """初始化文档录入服务。"""
         self.repository = repository
@@ -39,6 +41,7 @@ class DocumentIngestService:
         self.es_service = es_service
         self.milvus_service = milvus_service
         self.semantic_planner = semantic_planner
+        self.taxonomy_extractor = taxonomy_extractor
 
     def ingest_document(
         self,
@@ -149,11 +152,12 @@ class DocumentIngestService:
             document["id"],
             len(chunks),
         )
+        taxonomy = await self._extract_and_store_taxonomy(document, content)
         indexed_chunks = self.repository.list_document_chunks(
             document["knowledge_base_id"],
             document["id"],
         )
-        await self._index_chunks(document, indexed_chunks)
+        await self._index_chunks(document, indexed_chunks, taxonomy=taxonomy)
         return self.repository.mark_document_indexed(
             document["knowledge_base_id"],
             document["id"],
@@ -174,20 +178,66 @@ class DocumentIngestService:
             rag_search_logger.warning("[知识库] 语义分块规划失败，使用 Markdown 兜底, error={}", str(exc))
             return None
 
-    async def _index_chunks(self, document: dict[str, Any], chunks: list[dict[str, Any]]) -> None:
+    async def _extract_and_store_taxonomy(self, document: dict[str, Any], content: str) -> dict[str, Any] | None:
+        """抽取并保存主题树，失败时只降级记录日志，不阻塞入库。"""
+        try:
+            taxonomy = await self._get_taxonomy_extractor().extract(
+                title=document["document_name"],
+                content=content,
+                existing_tags=[document["document_name"]],
+            )
+            return self.repository.upsert_document_topics(
+                knowledge_base_id=document["knowledge_base_id"],
+                document_id=document["id"],
+                primary_topic=taxonomy.primary_topic,
+                parent_topics=taxonomy.parent_topics,
+                sibling_topics=taxonomy.sibling_topics,
+                child_topics=taxonomy.child_topics,
+                topic_aliases=taxonomy.topic_aliases,
+                topic_path=taxonomy.topic_path,
+                confidence=taxonomy.confidence,
+                evidence=taxonomy.evidence,
+            )
+        except Exception as exc:
+            rag_search_logger.warning("[知识库] 主题树抽取失败，继续索引文档, document_id={}, error={}", document.get("id"), str(exc))
+            return None
+
+    async def _index_chunks(
+        self,
+        document: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        taxonomy: dict[str, Any] | None = None,
+    ) -> None:
         """批量写入 chunk 到 ES 和 Milvus。"""
         if not chunks:
             return
-        texts = [chunk["content"] for chunk in chunks]
-        vectors = await self._get_embedding_service().encode(texts)
+        texts = [chunk.get("indexed_content") or chunk["content"] for chunk in chunks]
+        vectors = await self._embed_texts_in_batches(texts)
         documents = [
-            self._build_index_document(document, chunk, vectors[index])
+            self._build_index_document(document, chunk, vectors[index], taxonomy=taxonomy)
             for index, chunk in enumerate(chunks)
         ]
         await self._get_es_service().index_documents(Config.ES_ASSET_INDEX, documents)
         await self._get_milvus_service().batch_insert("knowledge_chunk", documents)
 
-    def _build_index_document(self, document: dict[str, Any], chunk: dict[str, Any], vector: list[float]) -> dict[str, Any]:
+    async def _embed_texts_in_batches(self, texts: list[str]) -> list[list[float]]:
+        """分批调用 Embedding，避免长文档一次请求过大导致整篇索引失败。"""
+        batch_size = max(1, Config.KNOWLEDGE_BASE_EMBEDDING_BATCH_SIZE)
+        vectors: list[list[float]] = []
+        embedding_service = self._get_embedding_service()
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start:start + batch_size]
+            batch_vectors = await embedding_service.encode(batch)
+            vectors.extend(batch_vectors)
+        return vectors
+
+    def _build_index_document(
+        self,
+        document: dict[str, Any],
+        chunk: dict[str, Any],
+        vector: list[float],
+        taxonomy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """构建 ES/Milvus 共用 chunk 索引文档。"""
         index_content = chunk.get("indexed_content") or chunk["content"]
         metadata = {
@@ -200,6 +250,21 @@ class DocumentIngestService:
             "section_title": chunk.get("title", ""),
             "title": chunk.get("title", ""),
         }
+        features = {
+            "title": chunk.get("title", ""),
+            "tags": [document["document_name"]],
+        }
+        if taxonomy:
+            metadata.update({
+                "primary_topic": taxonomy["primary_topic"],
+                "topic_path": taxonomy["topic_path"],
+            })
+            features.update({
+                "primary_topic": taxonomy["primary_topic"],
+                "parent_topics": taxonomy["parent_topics"],
+                "topic_path": taxonomy["topic_path"],
+                "topic_aliases": taxonomy["topic_aliases"],
+            })
         return {
             "doc_id": chunk["id"],
             "id": chunk["id"],
@@ -207,10 +272,7 @@ class DocumentIngestService:
             "content": chunk["content"],
             "vector": vector,
             "metadata": metadata,
-            "features": {
-                "title": chunk.get("title", ""),
-                "tags": [document["document_name"]],
-            },
+            "features": features,
         }
 
     def _get_embedding_service(self):
@@ -239,6 +301,12 @@ class DocumentIngestService:
                 timeout_ms=settings["llm_planning_timeout_ms"],
             )
         return self.semantic_planner
+
+    def _get_taxonomy_extractor(self):
+        """获取主题树抽取服务。"""
+        if self.taxonomy_extractor is None:
+            self.taxonomy_extractor = TaxonomyExtractionService()
+        return self.taxonomy_extractor
 
     def _assert_knowledge_base_owner(self, knowledge_base_id: str, owner_id: str) -> None:
         """校验文档录入者是否为知识库 owner。"""

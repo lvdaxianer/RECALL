@@ -99,6 +99,9 @@ class SearchResult(BaseModel):
 class RecommendationResult(SearchResult):
     """推荐结果项"""
     reason: str = Field("", description="推荐原因")
+    kind: Literal["document", "topic"] = Field("document", description="推荐类型")
+    topic_path: List[str] = Field(default_factory=list, description="主题路径")
+    follow_up_question: Optional[str] = Field(None, description="建议继续追问的问题")
 
 
 class SearchResponse(BaseModel):

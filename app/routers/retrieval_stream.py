@@ -24,19 +24,21 @@ from app.services.cache_service import get_cache_service
 from app.services.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.retrieval_answer_service import RetrievalAnswerService, filter_results_for_answer
 from app.services.retrieval_sdk_service import RetrievalSDKService
+from app.services.session_title_service import get_session_title_service
 from app.services.session_service import SessionNotFoundError, get_session_service
 from app.services.sse_event_service import build_event, encode_sse_event
+from app.services.topic_recommendation_service import TopicRecommendationService
 
 
 router = APIRouter(prefix="/api/v1/retrieval", tags=["RetrievalSDK"])
 KNOWLEDGE_BASE_DB_PATH = Config.KNOWLEDGE_BASE_DB_PATH or str(Path("data") / "knowledge_base.sqlite")
-STREAM_DELTA_DELAY_SECONDS = 0.024
 CACHED_ANSWER_DELTA_CHARS = 16
 REQUEST_RECEIVED_SUMMARY = "收到问题"
 QUERY_SCOPE_PROGRESS_SUMMARY = "正在判断这个问题适合怎么查"
 RETRIEVAL_PROGRESS_SUMMARY = "正在从选中的知识库里查找相关资料"
 RERANK_PROGRESS_SUMMARY = "正在把候选资料按相关性重新排序"
 ANSWER_GENERATION_PROGRESS_SUMMARY = "已找到可用资料，正在整理回答"
+DEEP_SEARCH_PROGRESS_SUMMARY = "深度检索会拆分问题并多轮检索，可能需要更久"
 EXAMPLE_BLOCK_PATTERN = re.compile(r"(用户问[:：].*?(?:模型答[:：].*?)(?=\n\S|$))", flags=re.DOTALL)
 CODE_BLOCK_PATTERN = re.compile(r"```.*?```", flags=re.DOTALL)
 
@@ -121,13 +123,14 @@ async def _stream_retrieval_events(
     cache_started = time.perf_counter()
     cached = (
         answer_cache.get(retrieval_query, request.knowledge_base_ids, top_k, temperature=request.temperature)
-        if answer_cache
+        if answer_cache and not request.deep_search_enabled
         else None
     )
     stage_durations["answer_cache"] = _elapsed_ms(cache_started)
     if cached is not None:
         if answer_cache is not None:
             answer_cache.bind_request_id(cached["cache_key"], request_id)
+        recommendation_task = _start_recommendation_task(request, cached["citations"])
         async for event in _stream_cached_answer(
             request,
             run_id,
@@ -137,6 +140,7 @@ async def _stream_retrieval_events(
             sequence,
             stage_durations=stage_durations,
             total_duration_ms=_elapsed_ms(total_started),
+            recommendation_task=recommendation_task,
         ):
             yield event
         return
@@ -146,25 +150,24 @@ async def _stream_retrieval_events(
         sequence,
         request_id,
         {
-            "stage": "retrieval",
-            "summary": RETRIEVAL_PROGRESS_SUMMARY,
+            "stage": "deep_search_planning" if request.deep_search_enabled else "retrieval",
+            "summary": DEEP_SEARCH_PROGRESS_SUMMARY if request.deep_search_enabled else RETRIEVAL_PROGRESS_SUMMARY,
         },
     )
     retrieval_started = time.perf_counter()
-    result = await retrieval_service.search_with_engines(
-        input=retrieval_query,
-        knowledge_base_ids=request.knowledge_base_ids,
-        top_k=top_k,
-        request_id=request_id,
-        issue_type=request.issue_type,
-    )
+    result = await _run_retrieval_search(retrieval_service, request, retrieval_query, top_k, request_id)
     stage_durations["retrieval"] = _elapsed_ms(retrieval_started)
     result = {
         **result,
         "trace": _with_trace_duration(_public_retrieval_trace(result.get("trace", [])), stage_durations["retrieval"]),
     }
+    if request.deep_search_enabled:
+        sequence, deep_search_events = _build_deep_search_events(request, run_id, result, request_id, sequence)
+        for event in deep_search_events:
+            yield event
     answer_results = filter_results_for_answer(request.input, result["results"])
     answer_result = {**result, "results": answer_results}
+    recommendation_task = _start_recommendation_task(request, answer_results)
     sequence += 1
     yield _encode("retrieval.trace", sequence, result["request_id"], {"trace": result["trace"]})
     _persist_chat_trace_event(request, run_id, result)
@@ -187,7 +190,7 @@ async def _stream_retrieval_events(
         temperature=request.temperature,
     ):
         if answer_deltas:
-            await delta_sleep(STREAM_DELTA_DELAY_SECONDS)
+            await delta_sleep(Config.STREAM_DELTA_DELAY_SECONDS)
         answer_deltas.append(delta)
         sequence += 1
         _persist_chat_delta_event(request, run_id, answer_result, delta)
@@ -208,11 +211,71 @@ async def _stream_retrieval_events(
             "results": _citation_results(answer_results),
         },
     )
+    sequence += 1
+    yield await _finish_recommendation_event(
+        recommendation_task,
+        sequence,
+        result["request_id"],
+        request,
+        run_id,
+    )
 
 
 def _elapsed_ms(started: float) -> float:
     """计算阶段毫秒耗时。"""
     return round((time.perf_counter() - started) * 1000, 3)
+
+
+async def _run_retrieval_search(
+    retrieval_service: RetrievalSDKService,
+    request: RetrievalSDKSearchRequest,
+    retrieval_query: str,
+    top_k: int,
+    request_id: str,
+) -> dict:
+    """按请求开关执行普通检索或 DeepSearch。"""
+    if request.deep_search_enabled and hasattr(retrieval_service, "deep_search_with_engines"):
+        return await retrieval_service.deep_search_with_engines(
+            input=retrieval_query,
+            knowledge_base_ids=request.knowledge_base_ids,
+            top_k=top_k,
+            request_id=request_id,
+            issue_type=request.issue_type,
+        )
+    return await retrieval_service.search_with_engines(
+        input=retrieval_query,
+        knowledge_base_ids=request.knowledge_base_ids,
+        top_k=top_k,
+        request_id=request_id,
+        issue_type=request.issue_type,
+    )
+
+
+def _build_deep_search_events(
+    request: RetrievalSDKSearchRequest,
+    run_id: str | None,
+    result: dict,
+    request_id: str,
+    sequence: int,
+) -> tuple[int, list[str]]:
+    """把 DeepSearch 公开计划和步骤写入 SSE 与会话事件。"""
+    events: list[str] = []
+    deep_search = result.get("deep_search") if isinstance(result.get("deep_search"), dict) else {}
+    if not deep_search:
+        return sequence, events
+    plan_payload = {
+        "intent": deep_search.get("intent", ""),
+        "cot_plan": deep_search.get("cot_plan", []),
+        "sub_questions": deep_search.get("sub_questions", []),
+    }
+    sequence += 1
+    events.append(_encode("deep_search.plan", sequence, request_id, plan_payload))
+    _persist_chat_named_event(request, run_id, "deep_search.plan", plan_payload, request_id)
+    for step in deep_search.get("steps", []) or []:
+        sequence += 1
+        events.append(_encode("deep_search.step", sequence, request_id, step))
+        _persist_chat_named_event(request, run_id, "deep_search.step", step, request_id)
+    return sequence, events
 
 
 def _with_trace_duration(trace: list[dict], duration_ms: float) -> list[dict]:
@@ -224,6 +287,90 @@ def _with_trace_duration(trace: list[dict], duration_ms: float) -> list[dict]:
         }
         for item in trace
     ]
+
+
+def _start_recommendation_task(
+    request: RetrievalSDKSearchRequest,
+    answer_results: list[dict],
+) -> asyncio.Task:
+    """启动非阻塞推荐任务，不让推荐影响主答案生成。"""
+    return asyncio.create_task(
+        _get_topic_recommendation_service().build(
+            query=request.input,
+            retrieval_results=answer_results,
+            knowledge_base_ids=request.knowledge_base_ids,
+        )
+    )
+
+
+async def _finish_recommendation_event(
+    recommendation_task: asyncio.Task,
+    sequence: int,
+    request_id: str,
+    request: RetrievalSDKSearchRequest,
+    run_id: str | None,
+) -> str:
+    """在答案完成后用独立预算收尾推荐事件。"""
+    timeout_seconds = max(0, Config.RAG_RECOMMENDATION_TIMEOUT_MS) / 1000
+    try:
+        recommendations = await asyncio.wait_for(asyncio.shield(recommendation_task), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        payload = {
+            "recommendation_count": 0,
+            "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+            "recommendation_source": "topic_taxonomy",
+            "reason": "recommendation_timeout",
+        }
+        _persist_chat_named_event(request, run_id, "recommendation.skipped", payload, request_id)
+        return _encode("recommendation.skipped", sequence, request_id, payload)
+    except Exception:
+        payload = {
+            "recommendation_count": 0,
+            "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+            "recommendation_source": "topic_taxonomy",
+            "reason": "recommendation_failed",
+        }
+        _persist_chat_named_event(request, run_id, "recommendation.skipped", payload, request_id)
+        return _encode("recommendation.skipped", sequence, request_id, payload)
+
+    payload = _recommendation_payload(recommendations)
+    _persist_chat_named_event(request, run_id, "recommendation.completed", payload, request_id)
+    return _encode("recommendation.completed", sequence, request_id, payload)
+
+
+def _recommendation_payload(recommendations: list) -> dict:
+    """构建推荐完成事件负载，包含混合卡片详情。"""
+    items = [
+        _safe_recommendation_item(item.model_dump() if hasattr(item, "model_dump") else dict(item))
+        for item in recommendations
+    ]
+    return {
+        "recommendation_count": len(items),
+        "recommendation_kind": "mixed",
+        "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+        "recommendation_source": "topic_taxonomy",
+        "recommendations": items,
+        "recommended_ids": [
+            item.get("metadata", {}).get("id") or item.get("metadata", {}).get("doc_id")
+            for item in items
+        ],
+    }
+
+
+def _safe_recommendation_item(item: dict) -> dict:
+    """清洗推荐卡片文本，避免绕过引用片段清理。"""
+    safe_item = dict(item)
+    description = safe_item.get("description")
+    if isinstance(description, str):
+        safe_item["description"] = _safe_citation_snippet(description)
+    metadata = safe_item.get("metadata")
+    if isinstance(metadata, dict):
+        safe_metadata = dict(metadata)
+        document_name = safe_metadata.get("document_name")
+        if isinstance(document_name, str):
+            safe_metadata["document_name"] = _display_document_name(document_name)
+        safe_item["metadata"] = safe_metadata
+    return safe_item
 
 
 def _resolve_request_top_k(retrieval_service: RetrievalSDKService, request: RetrievalSDKSearchRequest) -> int:
@@ -260,6 +407,7 @@ async def _stream_cached_answer(
     sequence: int,
     stage_durations: dict[str, float] | None = None,
     total_duration_ms: float | None = None,
+    recommendation_task: asyncio.Task | None = None,
 ) -> AsyncIterator[str]:
     """Emit cached answer as SSE while preserving streaming shape."""
     trace = _cached_trace(cached)
@@ -278,7 +426,7 @@ async def _stream_cached_answer(
     deltas = _split_cached_answer(cached["answer"], cached["citations"])
     for index, delta in enumerate(deltas):
         if index > 0:
-            await delta_sleep(STREAM_DELTA_DELAY_SECONDS)
+            await delta_sleep(Config.STREAM_DELTA_DELAY_SECONDS)
         sequence += 1
         _persist_chat_delta_event(request, run_id, result, delta)
         yield _encode("answer.delta", sequence, request_id, delta)
@@ -298,6 +446,15 @@ async def _stream_cached_answer(
             "results": cached["citations"],
         },
     )
+    if recommendation_task is not None:
+        sequence += 1
+        yield await _finish_recommendation_event(
+            recommendation_task,
+            sequence,
+            request_id,
+            request,
+            run_id,
+        )
 
 
 def _cached_trace(cached: dict) -> list[dict]:
@@ -348,6 +505,8 @@ def _store_answer_cache(
     top_k: int | None = None,
 ) -> None:
     """Store useful successful answers; skip empty/no-result answers unless later explicitly liked."""
+    if request.deep_search_enabled:
+        return
     if answer_cache is None or not answer.strip() or not result.get("results"):
         return
     answer_cache.set(
@@ -452,6 +611,11 @@ def _get_answer_cache_service() -> AnswerCacheService:
     return AnswerCacheService(KnowledgeBaseRepository(KNOWLEDGE_BASE_DB_PATH))
 
 
+def _get_topic_recommendation_service() -> TopicRecommendationService:
+    """构建主题推荐服务。"""
+    return TopicRecommendationService(KnowledgeBaseRepository(KNOWLEDGE_BASE_DB_PATH))
+
+
 def _create_chat_run(request: RetrievalSDKSearchRequest) -> str | None:
     """请求携带 session 时创建聊天 run。"""
     if not request.user_id or not request.session_id:
@@ -523,6 +687,24 @@ def _persist_chat_stream_events(
     )
 
 
+def _schedule_session_auto_title(request: RetrievalSDKSearchRequest, answer: str) -> None:
+    """后台生成默认会话标题，不阻塞 SSE 完成事件。"""
+    if not request.user_id or not request.session_id:
+        return
+    try:
+        asyncio.create_task(
+            get_session_title_service().auto_title_if_needed(
+                get_session_service(),
+                request.user_id,
+                request.session_id,
+                request.input,
+                answer,
+            )
+        )
+    except RuntimeError:
+        pass
+
+
 def _persist_chat_trace_event(
     request: RetrievalSDKSearchRequest,
     run_id: str | None,
@@ -538,6 +720,26 @@ def _persist_chat_trace_event(
         "retrieval.trace",
         {"trace": result["trace"]},
         request_id=result["request_id"],
+    )
+
+
+def _persist_chat_named_event(
+    request: RetrievalSDKSearchRequest,
+    run_id: str | None,
+    event_name: str,
+    payload: dict,
+    request_id: str,
+) -> None:
+    """请求携带 session 时保存指定聊天事件。"""
+    if not request.user_id or not request.session_id or run_id is None:
+        return
+    get_session_service().append_event(
+        request.user_id,
+        request.session_id,
+        run_id,
+        event_name,
+        payload,
+        request_id=request_id,
     )
 
 
@@ -586,6 +788,7 @@ def _persist_chat_completed_event(
         status="completed",
         answer=answer,
     )
+    _schedule_session_auto_title(request, answer)
 
 
 def _assert_published_knowledge_bases(knowledge_base_ids: list[str]) -> None:

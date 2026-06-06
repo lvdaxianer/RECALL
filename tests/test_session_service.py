@@ -92,6 +92,24 @@ def test_update_run_keeps_ownership_and_sets_answer():
     assert updated.answer == "检查域名"
 
 
+def test_update_session_title_keeps_user_scope_and_persists(tmp_path):
+    """更新会话标题应保持用户隔离，并写入持久化仓储。"""
+    repository = SessionRepository(str(tmp_path / "agent_sessions.sqlite3"))
+    service = SessionService(repository=repository)
+    session = service.create_session("u001", title="新的检索会话")
+
+    updated = service.update_session_title("u001", session.session_id, "小程序白屏排查", source="manual")
+
+    assert updated.title == "小程序白屏排查"
+    assert updated.metadata["title_source"] == "manual"
+    assert SessionService(repository=SessionRepository(str(tmp_path / "agent_sessions.sqlite3"))).get_session(
+        "u001",
+        session.session_id,
+    ).title == "小程序白屏排查"
+    with pytest.raises(SessionNotFoundError):
+        service.update_session_title("u002", session.session_id, "越权改名")
+
+
 def test_event_sequence_stays_monotonic_after_trimming():
     service = SessionService(max_events_per_run=1)
     session = service.create_session("u001")

@@ -40,6 +40,12 @@ class CreateRunRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="调用方元数据")
 
 
+class UpdateSessionRequest(BaseModel):
+    """更新 Agent Session 请求。"""
+
+    title: Optional[str] = Field(None, min_length=1, max_length=80, description="会话标题")
+
+
 @router.get("/runtimes/{runtime_id}/health", response_model=APIResponse)
 async def get_runtime_health(runtime_id: str):
     """
@@ -101,6 +107,23 @@ async def list_sessions(user_id: str):
     """
     sessions = get_session_service().list_sessions(user_id)
     return APIResponse(data=[session.model_dump() for session in sessions])
+
+
+@router.patch("/{user_id}/sessions/{session_id}", response_model=APIResponse)
+async def update_session(user_id: str, session_id: str, request: UpdateSessionRequest):
+    """
+    更新 Agent session 元数据。
+
+    @param user_id - 用户 ID
+    @param session_id - 会话 ID
+    @param request - 更新请求
+    @returns session 数据
+    """
+    session_service = get_session_service()
+    session = session_service.get_session(user_id, session_id)
+    if request.title is not None:
+        session = session_service.update_session_title(user_id, session_id, request.title, source="manual")
+    return APIResponse(data=session.model_dump())
 
 
 @router.post("/{user_id}/sessions/{session_id}/runs")

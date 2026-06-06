@@ -94,6 +94,49 @@ CREATE TABLE IF NOT EXISTS synonym_groups (
 )
 """
 
+CREATE_DOCUMENT_TOPIC_TABLE = """
+CREATE TABLE IF NOT EXISTS document_topics (
+    document_id TEXT PRIMARY KEY,
+    knowledge_base_id TEXT NOT NULL,
+    primary_topic TEXT NOT NULL,
+    parent_topics_json TEXT NOT NULL,
+    sibling_topics_json TEXT NOT NULL,
+    child_topics_json TEXT NOT NULL,
+    topic_aliases_json TEXT NOT NULL,
+    topic_path_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence_json TEXT NOT NULL,
+    extraction_status TEXT NOT NULL DEFAULT 'ready',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+CREATE_TOPIC_NODE_TABLE = """
+CREATE TABLE IF NOT EXISTS topic_nodes (
+    knowledge_base_id TEXT NOT NULL,
+    canonical_topic TEXT NOT NULL,
+    normalized_topic TEXT NOT NULL,
+    parent_topic TEXT,
+    aliases_json TEXT NOT NULL,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (knowledge_base_id, normalized_topic)
+)
+"""
+
+CREATE_TOPIC_EDGE_TABLE = """
+CREATE TABLE IF NOT EXISTS topic_edges (
+    knowledge_base_id TEXT NOT NULL,
+    parent_topic TEXT NOT NULL,
+    child_topic TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (knowledge_base_id, parent_topic, child_topic, edge_type)
+)
+"""
+
 KB_SETTINGS_FIELDS = {
     "semantic_chunking_enabled",
     "chunk_size",
@@ -392,6 +435,245 @@ class KnowledgeBaseRepository:
             return current
         return self.update_knowledge_base_status(kb_id, "changed")
 
+    def upsert_document_topics(
+        self,
+        knowledge_base_id: str,
+        document_id: str,
+        primary_topic: str,
+        parent_topics: list[str] | None = None,
+        sibling_topics: list[str] | None = None,
+        child_topics: list[str] | None = None,
+        topic_aliases: list[str] | None = None,
+        topic_path: list[str] | None = None,
+        confidence: float = 0.0,
+        evidence: list[str] | None = None,
+        extraction_status: str = "ready",
+    ) -> dict[str, Any]:
+        """保存文档主题抽取结果，并重建该知识库的主题索引。"""
+        self._require_knowledge_base(knowledge_base_id)
+        document = self.get_document(knowledge_base_id, document_id)
+        if document is None:
+            raise ValueError("文档不存在")
+        normalized_primary = str(primary_topic).strip()
+        if not normalized_primary:
+            raise ValueError("主主题不能为空")
+        now = _utc_now()
+        record = {
+            "document_id": document_id,
+            "knowledge_base_id": knowledge_base_id,
+            "primary_topic": normalized_primary,
+            "parent_topics_json": _json_list(parent_topics),
+            "sibling_topics_json": _json_list(sibling_topics),
+            "child_topics_json": _json_list(child_topics),
+            "topic_aliases_json": _json_list(topic_aliases),
+            "topic_path_json": _json_list(topic_path),
+            "confidence": max(0.0, min(float(confidence), 1.0)),
+            "evidence_json": _json_list(evidence),
+            "extraction_status": extraction_status or "ready",
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO document_topics
+                    (document_id, knowledge_base_id, primary_topic, parent_topics_json, sibling_topics_json,
+                     child_topics_json, topic_aliases_json, topic_path_json, confidence, evidence_json,
+                     extraction_status, created_at, updated_at)
+                VALUES
+                    (:document_id, :knowledge_base_id, :primary_topic, :parent_topics_json, :sibling_topics_json,
+                     :child_topics_json, :topic_aliases_json, :topic_path_json, :confidence, :evidence_json,
+                     :extraction_status, :created_at, :updated_at)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    knowledge_base_id = excluded.knowledge_base_id,
+                    primary_topic = excluded.primary_topic,
+                    parent_topics_json = excluded.parent_topics_json,
+                    sibling_topics_json = excluded.sibling_topics_json,
+                    child_topics_json = excluded.child_topics_json,
+                    topic_aliases_json = excluded.topic_aliases_json,
+                    topic_path_json = excluded.topic_path_json,
+                    confidence = excluded.confidence,
+                    evidence_json = excluded.evidence_json,
+                    extraction_status = excluded.extraction_status,
+                    updated_at = excluded.updated_at
+                """,
+                record,
+            )
+            self._rebuild_topic_index(connection, knowledge_base_id)
+        result = self.get_document_topics(knowledge_base_id, document_id)
+        if result is None:
+            raise ValueError("主题保存失败")
+        return result
+
+    def get_document_topics(self, knowledge_base_id: str, document_id: str) -> dict[str, Any] | None:
+        """读取文档主题抽取结果。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM document_topics
+                WHERE knowledge_base_id = ? AND document_id = ?
+                """,
+                (knowledge_base_id, document_id),
+            ).fetchone()
+        return _document_topic_row_to_dict(row) if row is not None else None
+
+    def list_document_topics(self, knowledge_base_id: str) -> list[dict[str, Any]]:
+        """列出知识库下所有文档主题事实。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    dt.*,
+                    d.document_name,
+                    d.status AS document_status,
+                    d.updated_at AS document_updated_at
+                FROM document_topics dt
+                JOIN knowledge_base_documents d ON d.id = dt.document_id
+                WHERE dt.knowledge_base_id = ?
+                ORDER BY dt.updated_at DESC
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+        return [_document_topic_row_to_dict(row) for row in rows]
+
+    def list_topic_nodes(self, knowledge_base_id: str, prefix: str | None = None) -> list[dict[str, Any]]:
+        """列出主题节点，可按标准化主题前缀过滤。"""
+        normalized_prefix = _normalize_topic(prefix or "")
+        with self._connect() as connection:
+            if normalized_prefix:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM topic_nodes
+                    WHERE knowledge_base_id = ? AND normalized_topic LIKE ?
+                    ORDER BY doc_count DESC, canonical_topic ASC
+                    """,
+                    (knowledge_base_id, f"{normalized_prefix}%"),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM topic_nodes
+                    WHERE knowledge_base_id = ?
+                    ORDER BY doc_count DESC, canonical_topic ASC
+                    """,
+                    (knowledge_base_id,),
+                ).fetchall()
+        return [_topic_node_row_to_dict(row) for row in rows]
+
+    def upsert_topic_node(
+        self,
+        knowledge_base_id: str,
+        canonical_topic: str,
+        parent_topic: str | None = None,
+        aliases: list[str] | None = None,
+        doc_count: int = 0,
+    ) -> dict[str, Any]:
+        """显式写入或更新主题节点。"""
+        now = _utc_now()
+        normalized_topic = _normalize_topic(canonical_topic)
+        if not normalized_topic:
+            raise ValueError("主题不能为空")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO topic_nodes
+                    (knowledge_base_id, canonical_topic, normalized_topic, parent_topic, aliases_json, doc_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(knowledge_base_id, normalized_topic) DO UPDATE SET
+                    canonical_topic = excluded.canonical_topic,
+                    parent_topic = excluded.parent_topic,
+                    aliases_json = excluded.aliases_json,
+                    doc_count = excluded.doc_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    knowledge_base_id,
+                    canonical_topic.strip(),
+                    normalized_topic,
+                    parent_topic,
+                    _json_list(aliases),
+                    max(0, int(doc_count)),
+                    now,
+                ),
+            )
+        nodes = self.list_topic_nodes(knowledge_base_id)
+        return next(node for node in nodes if node["normalized_topic"] == normalized_topic)
+
+    def upsert_topic_edge(
+        self,
+        knowledge_base_id: str,
+        parent_topic: str,
+        child_topic: str,
+        edge_type: str,
+        doc_count: int = 0,
+    ) -> dict[str, Any]:
+        """显式写入或更新主题关系边。"""
+        now = _utc_now()
+        if not parent_topic.strip() or not child_topic.strip():
+            raise ValueError("主题边两端不能为空")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO topic_edges
+                    (knowledge_base_id, parent_topic, child_topic, edge_type, doc_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(knowledge_base_id, parent_topic, child_topic, edge_type) DO UPDATE SET
+                    doc_count = excluded.doc_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    knowledge_base_id,
+                    parent_topic.strip(),
+                    child_topic.strip(),
+                    edge_type,
+                    max(0, int(doc_count)),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM topic_edges
+                WHERE knowledge_base_id = ? AND parent_topic = ? AND child_topic = ? AND edge_type = ?
+                """,
+                (knowledge_base_id, parent_topic.strip(), child_topic.strip(), edge_type),
+            ).fetchone()
+        return _row_to_dict(row)
+
+    def find_documents_by_topic(
+        self,
+        knowledge_base_id: str,
+        topic: str,
+        relation_type: str = "same",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """按主题关系查找文档，不依赖 LLM。"""
+        normalized = _normalize_topic(topic)
+        if not normalized or limit <= 0:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    dt.*,
+                    d.document_name,
+                    d.status AS document_status,
+                    d.updated_at AS document_updated_at
+                FROM document_topics dt
+                JOIN knowledge_base_documents d ON d.id = dt.document_id
+                WHERE dt.knowledge_base_id = ?
+                ORDER BY dt.updated_at DESC
+                """,
+                (knowledge_base_id,),
+            ).fetchall()
+        matches = []
+        for row in rows:
+            record = _document_topic_row_to_dict(row)
+            if _document_topic_matches(record, normalized, relation_type):
+                matches.append(record)
+            if len(matches) >= limit:
+                break
+        return matches
+
     def delete_knowledge_base(self, kb_id: str) -> dict[str, Any]:
         """软删除知识库并级联删除该库下文档和 chunk。"""
         self._require_knowledge_base(kb_id)
@@ -407,6 +689,18 @@ class KnowledgeBaseRepository:
             ).fetchone()["count"]
             connection.execute(
                 "DELETE FROM knowledge_base_chunks WHERE knowledge_base_id = ?",
+                (kb_id,),
+            )
+            connection.execute(
+                "DELETE FROM document_topics WHERE knowledge_base_id = ?",
+                (kb_id,),
+            )
+            connection.execute(
+                "DELETE FROM topic_nodes WHERE knowledge_base_id = ?",
+                (kb_id,),
+            )
+            connection.execute(
+                "DELETE FROM topic_edges WHERE knowledge_base_id = ?",
                 (kb_id,),
             )
             connection.execute(
@@ -785,6 +1079,9 @@ class KnowledgeBaseRepository:
             connection.execute(CREATE_CHUNK_TABLE)
             connection.execute(CREATE_KB_SETTINGS_TABLE)
             connection.execute(CREATE_SYNONYM_GROUP_TABLE)
+            connection.execute(CREATE_DOCUMENT_TOPIC_TABLE)
+            connection.execute(CREATE_TOPIC_NODE_TABLE)
+            connection.execute(CREATE_TOPIC_EDGE_TABLE)
             _ensure_column(connection, "knowledge_base_documents", "raw_content", "TEXT")
             _ensure_column(connection, "knowledge_base_documents", "parse_status", "TEXT NOT NULL DEFAULT 'queued'")
             _ensure_column(connection, "knowledge_base_documents", "parse_attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -794,6 +1091,86 @@ class KnowledgeBaseRepository:
             _ensure_column(connection, "knowledge_base_documents", "parsed_at", "TEXT")
             _ensure_column(connection, "knowledge_base_documents", "indexed_at", "TEXT")
             _ensure_column(connection, "knowledge_base_chunks", "indexed_content", "TEXT")
+
+    def _rebuild_topic_index(self, connection: sqlite3.Connection, knowledge_base_id: str) -> None:
+        """基于文档主题事实表重建主题节点和边，避免增量计数漂移。"""
+        rows = connection.execute(
+            "SELECT * FROM document_topics WHERE knowledge_base_id = ?",
+            (knowledge_base_id,),
+        ).fetchall()
+        node_map: dict[str, dict[str, Any]] = {}
+        edge_counts: dict[tuple[str, str, str], int] = {}
+        for row in rows:
+            record = _document_topic_row_to_dict(row)
+            primary_topic = record["primary_topic"]
+            topic_path = record["topic_path"] or [*record["parent_topics"], primary_topic]
+            all_topics = [*topic_path, *record["sibling_topics"], *record["child_topics"]]
+            for topic in _normalize_terms(all_topics):
+                normalized = _normalize_topic(topic)
+                node = node_map.setdefault(
+                    normalized,
+                    {
+                        "knowledge_base_id": knowledge_base_id,
+                        "canonical_topic": topic,
+                        "normalized_topic": normalized,
+                        "parent_topic": _parent_for_topic(topic, topic_path),
+                        "aliases": [],
+                        "doc_ids": set(),
+                    },
+                )
+                if topic == primary_topic:
+                    node["aliases"] = _normalize_terms([*node["aliases"], *record["topic_aliases"]])
+                node["doc_ids"].add(record["document_id"])
+            for parent, child in zip(topic_path, topic_path[1:]):
+                edge_counts[(parent, child, "parent_child")] = edge_counts.get((parent, child, "parent_child"), 0) + 1
+            for parent in record["parent_topics"]:
+                edge_counts[(parent, primary_topic, "parent")] = edge_counts.get((parent, primary_topic, "parent"), 0) + 1
+            for child in record["child_topics"]:
+                edge_counts[(primary_topic, child, "child")] = edge_counts.get((primary_topic, child, "child"), 0) + 1
+            for sibling in record["sibling_topics"]:
+                edge_counts[(primary_topic, sibling, "sibling")] = edge_counts.get((primary_topic, sibling, "sibling"), 0) + 1
+        now = _utc_now()
+        connection.execute("DELETE FROM topic_nodes WHERE knowledge_base_id = ?", (knowledge_base_id,))
+        connection.execute("DELETE FROM topic_edges WHERE knowledge_base_id = ?", (knowledge_base_id,))
+        connection.executemany(
+            """
+            INSERT INTO topic_nodes
+                (knowledge_base_id, canonical_topic, normalized_topic, parent_topic, aliases_json, doc_count, updated_at)
+            VALUES
+                (:knowledge_base_id, :canonical_topic, :normalized_topic, :parent_topic, :aliases_json, :doc_count, :updated_at)
+            """,
+            [
+                {
+                    "knowledge_base_id": node["knowledge_base_id"],
+                    "canonical_topic": node["canonical_topic"],
+                    "normalized_topic": node["normalized_topic"],
+                    "parent_topic": node["parent_topic"],
+                    "aliases_json": json.dumps(node["aliases"], ensure_ascii=False),
+                    "doc_count": len(node["doc_ids"]),
+                    "updated_at": now,
+                }
+                for node in node_map.values()
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO topic_edges
+                (knowledge_base_id, parent_topic, child_topic, edge_type, doc_count, updated_at)
+            VALUES
+                (:knowledge_base_id, :parent_topic, :child_topic, :edge_type, :doc_count, :updated_at)
+            """,
+            [
+                {
+                    "knowledge_base_id": knowledge_base_id,
+                    "parent_topic": parent,
+                    "child_topic": child,
+                    "edge_type": edge_type,
+                    "doc_count": count,
+                    "updated_at": now,
+                }
+                for (parent, child, edge_type), count in edge_counts.items()
+            ],
+        )
 
     def _create_default_settings(
         self,
@@ -923,6 +1300,29 @@ def _synonym_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def _document_topic_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """将文档主题 Row 转为外部字典。"""
+    record = dict(row)
+    for field in [
+        "parent_topics",
+        "sibling_topics",
+        "child_topics",
+        "topic_aliases",
+        "topic_path",
+        "evidence",
+    ]:
+        json_field = f"{field}_json"
+        record[field] = json.loads(record.pop(json_field, "[]") or "[]")
+    return record
+
+
+def _topic_node_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """将主题节点 Row 转为外部字典。"""
+    record = dict(row)
+    record["aliases"] = json.loads(record.pop("aliases_json", "[]") or "[]")
+    return record
+
+
 def _normalize_terms(terms: list[str]) -> list[str]:
     """裁剪并去重同义词条。"""
     normalized_terms: list[str] = []
@@ -935,6 +1335,46 @@ def _normalize_terms(terms: list[str]) -> list[str]:
         else:
             pass
     return normalized_terms
+
+
+def _json_list(value: list[str] | None) -> str:
+    """规范化字符串列表并序列化为 JSON。"""
+    return json.dumps(_normalize_terms(value or []), ensure_ascii=False)
+
+
+def _normalize_topic(topic: str) -> str:
+    """主题归一化，用于读路径确定性匹配。"""
+    return "".join(str(topic).strip().lower().split())
+
+
+def _parent_for_topic(topic: str, topic_path: list[str]) -> str | None:
+    """从主题路径中读取某主题的直接父主题。"""
+    for index, item in enumerate(topic_path):
+        if item == topic and index > 0:
+            return topic_path[index - 1]
+    return None
+
+
+def _document_topic_matches(record: dict[str, Any], normalized_topic: str, relation_type: str) -> bool:
+    """判断文档主题是否匹配指定关系。"""
+    if relation_type == "same":
+        candidates = [record["primary_topic"], *record["topic_aliases"]]
+    elif relation_type == "parent":
+        candidates = [*record["parent_topics"], *record["topic_path"][:-1]]
+    elif relation_type == "child":
+        candidates = record["child_topics"]
+    elif relation_type == "sibling":
+        candidates = record["sibling_topics"]
+    else:
+        candidates = [
+            record["primary_topic"],
+            *record["parent_topics"],
+            *record["sibling_topics"],
+            *record["child_topics"],
+            *record["topic_aliases"],
+            *record["topic_path"],
+        ]
+    return any(_normalize_topic(candidate) == normalized_topic for candidate in candidates)
 
 
 def _ensure_column(

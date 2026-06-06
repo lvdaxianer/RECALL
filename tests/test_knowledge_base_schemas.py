@@ -8,9 +8,11 @@ Date: 2026-06-03
 import pytest
 
 from app.models.knowledge_base_schemas import DocumentUploadRequest
+from app.models.knowledge_base_schemas import DocumentTopicExtractionResult
 from app.models.knowledge_base_schemas import KnowledgeBaseCreateRequest
 from app.models.knowledge_base_schemas import KnowledgeBaseSettings
 from app.models.knowledge_base_schemas import RetrievalSDKSearchRequest
+from app.models.schemas import RecommendationResult
 
 
 def test_document_upload_request_requires_kb_and_text_content():
@@ -138,3 +140,32 @@ def test_knowledge_base_settings_rejects_zero_top_k_default():
             top_k_default=0,
             updated_at="2026-06-05T00:00:00Z",
         )
+
+
+def test_document_topic_extraction_result_defaults_to_empty_taxonomy_lists():
+    """文档主题抽取结果在只给主主题时提供稳定空列表默认值。"""
+    result = DocumentTopicExtractionResult(primary_topic="适配器模式")
+
+    assert result.parent_topics == []
+    assert result.sibling_topics == []
+    assert result.child_topics == []
+    assert result.topic_aliases == []
+    assert result.topic_path == []
+    assert result.confidence == 0.0
+
+
+def test_recommendation_result_supports_document_and_topic_cards():
+    """推荐结果可以表达文档卡片和主题导航卡片。"""
+    recommendation = RecommendationResult(
+        metadata={"id": "topic-adapter"},
+        description="继续了解结构型设计模式",
+        score=0.8,
+        reason="同属结构型模式",
+        kind="topic",
+        topic_path=["Java", "设计模式", "结构型模式"],
+        follow_up_question="结构型模式里还有哪些常见设计模式？",
+    )
+
+    assert recommendation.kind == "topic"
+    assert recommendation.topic_path == ["Java", "设计模式", "结构型模式"]
+    assert recommendation.follow_up_question == "结构型模式里还有哪些常见设计模式？"

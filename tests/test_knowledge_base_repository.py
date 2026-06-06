@@ -234,3 +234,41 @@ def test_repository_marks_document_failed_or_requeued(tmp_path):
     assert failed["parse_status"] == "failed"
     assert failed["parse_error"] == "boom"
     assert repo.get_document(kb["id"], doc["id"])["parse_attempts"] == 2
+
+
+def test_repository_persists_document_topics_and_topic_edges(tmp_path):
+    """仓储保存文档主题事实表，并维护可检索的主题节点和边。"""
+    repo = KnowledgeBaseRepository(str(tmp_path / "kb.sqlite"))
+    kb = repo.create_knowledge_base("KB", "", "owner")
+    document = repo.upsert_document(
+        knowledge_base_id=kb["id"],
+        document_name="adapter.md",
+        content_type="text/markdown",
+        owner_id="owner",
+        chunk_count=1,
+        external_id="adapter.md",
+    )
+
+    repo.upsert_document_topics(
+        knowledge_base_id=kb["id"],
+        document_id=document["id"],
+        primary_topic="适配器模式",
+        parent_topics=["结构型模式", "设计模式"],
+        sibling_topics=["装饰器模式"],
+        child_topics=["Java 适配器模式实现"],
+        topic_aliases=["Adapter Pattern", "适配器"],
+        topic_path=["Java", "设计模式", "结构型模式", "适配器模式"],
+        confidence=0.92,
+        evidence=["标题命中", "章节标题命中"],
+    )
+
+    record = repo.get_document_topics(kb["id"], document["id"])
+    assert record["primary_topic"] == "适配器模式"
+    assert record["topic_path"] == ["Java", "设计模式", "结构型模式", "适配器模式"]
+    assert record["topic_aliases"] == ["Adapter Pattern", "适配器"]
+    nodes = repo.list_topic_nodes(kb["id"])
+    assert {node["canonical_topic"] for node in nodes} >= {"适配器模式", "结构型模式", "设计模式"}
+    same_topic_docs = repo.find_documents_by_topic(kb["id"], "适配器模式", relation_type="same")
+    parent_topic_docs = repo.find_documents_by_topic(kb["id"], "结构型模式", relation_type="parent")
+    assert same_topic_docs[0]["document_id"] == document["id"]
+    assert parent_topic_docs[0]["document_id"] == document["id"]

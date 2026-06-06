@@ -15,6 +15,7 @@ from typing import AsyncIterator
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+from app.config import Config
 from app.models.schemas import OptimizeSearchRequest, SearchRequest, SearchResult
 from app.routers.rag_optimize import _build_recommendations
 from app.routers.rag_optimize import _extract_retrieval_context
@@ -114,12 +115,11 @@ async def _generate_optimize_events(
     yield _emit(state, "retrieval.optimized.completed", user_id, request_id, _optimized_payload(optimized_result))
     yield _emit(state, "rerank.completed", user_id, request_id, _rerank_payload(optimized_result["query_profiles"]))
 
-    recommendations = _build_recommendations(
+    recommendation_task = _start_recommendation_task(
         original_result.results,
         optimized_result["results"],
         retrieval_context,
     )
-    yield _emit(state, "recommendation.completed", user_id, request_id, _recommendation_payload(recommendations))
     yield _emit(
         state,
         "answer.completed",
@@ -128,9 +128,11 @@ async def _generate_optimize_events(
         {
             "request_id": request_id,
             "result_count": len(optimized_result["results"]),
-            "recommendation_count": len(recommendations),
+            "recommendation_count": 0,
         },
     )
+    event_name, payload = await _finish_recommendation_task(recommendation_task)
+    yield _emit(state, event_name, user_id, request_id, payload)
 
 
 async def _run_original_stream_search(
@@ -321,10 +323,55 @@ def _rerank_payload(query_profiles: dict[str, dict]) -> dict:
     }
 
 
+def _start_recommendation_task(
+    original_results: list[SearchResult],
+    optimized_results: list[SearchResult],
+    retrieval_context: RetrievalContext | None,
+) -> asyncio.Task:
+    """在线程中生成推荐，避免同步推荐逻辑阻塞 SSE 主回答。"""
+    return asyncio.create_task(
+        asyncio.to_thread(
+            _build_recommendations,
+            original_results,
+            optimized_results,
+            retrieval_context,
+        )
+    )
+
+
+async def _finish_recommendation_task(recommendation_task: asyncio.Task) -> tuple[str, dict]:
+    """在答案完成后用独立预算等待推荐，超时则降级。"""
+    timeout_seconds = max(0, Config.RAG_RECOMMENDATION_TIMEOUT_MS) / 1000
+    try:
+        recommendations = await asyncio.wait_for(asyncio.shield(recommendation_task), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        return "recommendation.skipped", {
+            "recommendation_count": 0,
+            "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+            "recommendation_source": "optimized_retrieval",
+            "reason": "recommendation_timeout",
+        }
+    except Exception:
+        return "recommendation.skipped", {
+            "recommendation_count": 0,
+            "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+            "recommendation_source": "optimized_retrieval",
+            "reason": "recommendation_failed",
+        }
+    return "recommendation.completed", _recommendation_payload(recommendations)
+
+
 def _recommendation_payload(recommendations: list[SearchResult]) -> dict:
     """构建推荐完成事件负载。"""
     return {
         "recommendation_count": len(recommendations),
+        "recommendation_kind": "document",
+        "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+        "recommendation_source": "optimized_retrieval",
+        "recommendations": [
+            item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            for item in recommendations
+        ],
         "recommended_ids": [
             item.metadata.get("id") or item.metadata.get("doc_id")
             for item in recommendations

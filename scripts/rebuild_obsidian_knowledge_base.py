@@ -116,6 +116,9 @@ def fast_local_reset(db_path: Path) -> None:
         for table_name in [
             "knowledge_base_chunks",
             "knowledge_base_documents",
+            "document_topics",
+            "topic_nodes",
+            "topic_edges",
             "knowledge_base_settings",
             "synonym_groups",
             "retrieval_answer_cache",
@@ -126,6 +129,7 @@ def fast_local_reset(db_path: Path) -> None:
         ]:
             if _table_exists(connection, table_name):
                 connection.execute(f"DELETE FROM {table_name}")
+        connection.commit()
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:

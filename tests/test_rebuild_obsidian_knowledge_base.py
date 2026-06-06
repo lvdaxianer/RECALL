@@ -47,9 +47,15 @@ def test_fast_local_reset_clears_sqlite_tables(tmp_path):
         connection.execute("CREATE TABLE knowledge_bases (id TEXT)")
         connection.execute("CREATE TABLE knowledge_base_documents (id TEXT)")
         connection.execute("CREATE TABLE knowledge_base_chunks (id TEXT)")
+        connection.execute("CREATE TABLE document_topics (document_id TEXT)")
+        connection.execute("CREATE TABLE topic_nodes (knowledge_base_id TEXT)")
+        connection.execute("CREATE TABLE topic_edges (knowledge_base_id TEXT)")
         connection.execute("INSERT INTO knowledge_bases VALUES ('kb-1')")
         connection.execute("INSERT INTO knowledge_base_documents VALUES ('doc-1')")
         connection.execute("INSERT INTO knowledge_base_chunks VALUES ('chunk-1')")
+        connection.execute("INSERT INTO document_topics VALUES ('doc-1')")
+        connection.execute("INSERT INTO topic_nodes VALUES ('kb-1')")
+        connection.execute("INSERT INTO topic_edges VALUES ('kb-1')")
 
     fast_local_reset(db_path)
 
@@ -57,6 +63,9 @@ def test_fast_local_reset_clears_sqlite_tables(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM knowledge_bases").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM knowledge_base_documents").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM knowledge_base_chunks").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM document_topics").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM topic_nodes").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM topic_edges").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio

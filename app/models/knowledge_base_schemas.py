@@ -117,6 +117,19 @@ class DocumentUploadRequest(BaseModel):
         raise ValueError("重复文档策略仅支持 upsert、reject、versioned")
 
 
+class DocumentTopicExtractionResult(BaseModel):
+    """文档主题树抽取结果。"""
+
+    primary_topic: str = Field(..., min_length=1, max_length=160, description="文档主主题")
+    parent_topics: list[str] = Field(default_factory=list, description="上位主题")
+    sibling_topics: list[str] = Field(default_factory=list, description="同类主题")
+    child_topics: list[str] = Field(default_factory=list, description="下位主题")
+    topic_aliases: list[str] = Field(default_factory=list, description="主题别名")
+    topic_path: list[str] = Field(default_factory=list, description="从大类到主主题的主题路径")
+    confidence: float = Field(0.0, ge=0.0, le=1.0, description="抽取置信度")
+    evidence: list[str] = Field(default_factory=list, description="抽取依据")
+
+
 class RetrievalSDKSearchRequest(BaseModel):
     """Retrieval SDK 同步检索请求模型。"""
 
@@ -129,6 +142,7 @@ class RetrievalSDKSearchRequest(BaseModel):
     issue_type: str | None = Field(None, description="问题类型")
     issue_route: dict[str, Any] = Field(default_factory=dict, description="问题类型路由结果")
     issue_filters: dict[str, Any] = Field(default_factory=dict, description="问题类型过滤条件")
+    deep_search_enabled: bool = Field(False, description="是否启用 DeepSearch 深度检索")
     stream: bool = Field(False, description="是否请求流式输出")
     temperature: float = Field(0.2, ge=0.0, le=1.0, description="LLM 生成温度")
     user_id: str | None = Field(None, min_length=1, max_length=120, description="聊天用户 ID")

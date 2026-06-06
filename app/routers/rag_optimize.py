@@ -476,6 +476,9 @@ def _build_recommendation_trace_item(optimized_context: dict) -> dict:
         "summary": "根据原始和优化召回生成相关推荐",
         "metrics": {
             "recommendation_count": len(recommendations),
+            "recommendation_kind": "document",
+            "recommendation_budget_ms": Config.RAG_RECOMMENDATION_TIMEOUT_MS,
+            "recommendation_source": "optimized_retrieval",
             "top_k": Config.RAG_RECOMMENDATION_TOP_K,
             "query_type": retrieval_context.query_type if retrieval_context else "",
         }

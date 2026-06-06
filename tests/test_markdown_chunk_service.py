@@ -52,26 +52,38 @@ def test_markdown_chunking_respects_overlap():
 
 
 def test_markdown_chunking_adds_overlap_to_indexed_content_between_heading_chunks():
-    """标题分块后也要为检索索引补齐前文 overlap。"""
+    """标题分块后检索字段要补齐相邻 chunk 的双向 overlap。"""
     service = MarkdownChunkService(max_chars=100, overlap=7)
 
     chunks = service.split("# A\n第一段上下文ABCDEF\n## B\n第二段正文")
 
     assert chunks[0]["content"] == "第一段上下文ABCDEF"
-    assert chunks[0]["indexed_content"] == "第一段上下文ABCDEF"
+    assert chunks[0]["indexed_content"].startswith("第一段上下文ABCDEF")
+    assert chunks[0]["indexed_content"].endswith("第二段正文")
     assert chunks[1]["content"] == "第二段正文"
     assert chunks[1]["indexed_content"].startswith("文ABCDEF\n第二段正文")
 
 
 def test_markdown_chunking_adds_overlap_after_semantic_groups():
-    """语义计划合并后的相邻 chunk 也要补齐检索 overlap。"""
+    """语义计划合并后的相邻 chunk 也要补齐检索双向 overlap。"""
     service = MarkdownChunkService(max_chars=100, overlap=5)
     plan = {"groups": [["s1"], ["s2"]]}
 
     chunks = service.split("# A\n语义组一ABCDE\n# B\n语义组二正文", semantic_plan=plan)
 
+    assert chunks[0]["indexed_content"].endswith("语义组二正")
     assert chunks[1]["content"] == "语义组二正文"
     assert chunks[1]["indexed_content"].startswith("ABCDE\n语义组二正文")
+
+
+def test_markdown_chunking_adds_bidirectional_overlap_for_middle_chunk():
+    """中间 chunk 的检索字段应同时包含上文尾部和下文头部。"""
+    service = MarkdownChunkService(max_chars=100, overlap=2)
+
+    chunks = service.split("# A\n甲乙丙丁\n# B\n中间正文\n# C\n后续内容")
+
+    assert chunks[1]["content"] == "中间正文"
+    assert chunks[1]["indexed_content"] == "丙丁\n中间正文\n后续"
 
 
 def test_markdown_chunking_groups_sections_by_semantic_plan():

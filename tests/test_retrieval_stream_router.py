@@ -5,6 +5,7 @@ Author: lvdaxianerplus
 Date: 2026-06-03
 """
 
+import asyncio
 import json
 
 import pytest
@@ -13,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.models.knowledge_base_schemas import RetrievalSDKSearchRequest
 from app.routers.retrieval_stream import _stream_cached_answer, _stream_retrieval_events
+from app.routers.retrieval_stream import _store_answer_cache
 from app.services.answer_cache_service import AnswerCacheService
 from app.services.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.markdown_chunk_service import MarkdownChunkService
@@ -468,6 +470,71 @@ async def test_retrieval_stream_paces_answer_delta_events():
 
 
 @pytest.mark.asyncio
+async def test_retrieval_stream_emits_answer_completed_before_slow_recommendations(monkeypatch):
+    """推荐很慢时 answer.completed 仍应先输出，推荐随后超时降级。"""
+    class FakeRetrievalService:
+        async def search_with_engines(self, **kwargs):
+            return {
+                "request_id": kwargs["request_id"],
+                "results": [{"chunk_id": "c1", "document_id": "doc-1", "content": "证据", "score": 1}],
+                "trace": [],
+            }
+
+    class FakeAnswerService:
+        async def stream_synthesize(self, query, results, temperature=0.2):
+            yield {"text": "回答", "chunk_id": "c1"}
+
+    class SlowRecommendationService:
+        async def build(self, **kwargs):
+            await asyncio.sleep(0.5)
+            return []
+
+    monkeypatch.setattr("app.routers.retrieval_stream.Config.RAG_RECOMMENDATION_TIMEOUT_MS", 1, raising=False)
+    monkeypatch.setattr(
+        "app.routers.retrieval_stream._get_topic_recommendation_service",
+        lambda: SlowRecommendationService(),
+    )
+
+    events = [
+        event async for event in _stream_retrieval_events(
+            RetrievalSDKSearchRequest(input="适配器模式干啥的", knowledge_base_ids=["kb-001"], top_k=5),
+            run_id=None,
+            retrieval_service=FakeRetrievalService(),
+            answer_service=FakeAnswerService(),
+            answer_cache=None,
+            request_id="req-rec",
+            delta_sleep=lambda seconds: _noop_sleep(),
+        )
+    ]
+    event_names = [_event_name(event) for event in events]
+
+    assert event_names.index("answer.completed") < event_names.index("recommendation.skipped")
+
+
+def test_store_answer_cache_skips_empty_or_no_retrieval_result_answers():
+    """无检索命中或空答案不写入答案缓存。"""
+    class RecordingAnswerCache:
+        def __init__(self):
+            self.calls = []
+
+        def set(self, **kwargs):
+            self.calls.append(kwargs)
+
+    answer_cache = RecordingAnswerCache()
+
+    _store_answer_cache(
+        answer_cache=answer_cache,
+        request=RetrievalSDKSearchRequest(input="适配器模式干啥的", knowledge_base_ids=["kb-001"], top_k=5),
+        result={"request_id": "req-empty", "results": [], "trace": []},
+        answer="",
+        retrieval_query="适配器模式干啥的",
+        top_k=5,
+    )
+
+    assert answer_cache.calls == []
+
+
+@pytest.mark.asyncio
 async def test_retrieval_stream_passes_issue_type_to_sdk():
     """流式检索应把请求中的 issue_type 透传给 Retrieval SDK。"""
     class FakeRetrievalService:
@@ -551,6 +618,134 @@ async def test_retrieval_stream_passes_top_k_and_context_query_to_sdk():
 
     assert retrieval_service.kwargs["top_k"] == 10
     assert retrieval_service.kwargs["input"] == "第二问；第三问；第四问；当前问题"
+
+
+@pytest.mark.asyncio
+async def test_deep_search_stream_emits_visible_plan_and_step_hits():
+    """DeepSearch 应公开展示拆分问题和每一步命中摘要。"""
+    class FakeRetrievalService:
+        def build_retrieval_query(self, input_text, use_context=False, history_questions=None):
+            return input_text
+
+        async def deep_search_with_engines(self, **kwargs):
+            return {
+                "request_id": kwargs["request_id"],
+                "results": [{"chunk_id": "chunk-build", "document_name": "release.md", "title": "发布配置", "content": "检查发布配置"}],
+                "trace": [{"stage": "candidate_scoring", "summary": "最终合并排序", "metrics": {"engine": "deep_search_rerank"}}],
+                "deep_search": {
+                    "intent": "排查小程序上线后白屏",
+                    "cot_plan": ["识别故障现象", "拆分检索方向"],
+                    "sub_questions": ["是否是构建或发布配置导致白屏？", "是否是接口域名导致白屏？"],
+                    "steps": [
+                        {
+                            "index": 1,
+                            "sub_question": "是否是构建或发布配置导致白屏？",
+                            "hit_count": 1,
+                            "top_hits": [{"chunk_id": "chunk-build", "title": "发布配置", "score": 0.91}],
+                        },
+                        {
+                            "index": 2,
+                            "sub_question": "是否是接口域名导致白屏？",
+                            "hit_count": 0,
+                            "top_hits": [],
+                        },
+                    ],
+                },
+            }
+
+    class FakeAnswerService:
+        async def stream_synthesize(self, query, results, temperature=0.2):
+            yield {"text": "检查发布配置。", "chunk_id": "chunk-build"}
+
+    events = [
+        event async for event in _stream_retrieval_events(
+            RetrievalSDKSearchRequest(
+                input="小程序上线后白屏，本地正常",
+                knowledge_base_ids=["kb-001"],
+                top_k=5,
+                deep_search_enabled=True,
+            ),
+            run_id=None,
+            retrieval_service=FakeRetrievalService(),
+            answer_service=FakeAnswerService(),
+            request_id="req-deep",
+            delta_sleep=lambda seconds: _noop_sleep(),
+        )
+    ]
+
+    text = "".join(events)
+    assert "event: deep_search.plan" in text
+    assert "event: deep_search.step" in text
+    assert "深度检索会拆分问题并多轮检索，可能需要更久" in text
+    assert "是否是构建或发布配置导致白屏？" in text
+    assert "发布配置" in text
+    assert "完整私有推理链" not in text
+
+
+@pytest.mark.asyncio
+async def test_deep_search_stream_skips_normal_answer_cache(tmp_path):
+    """DeepSearch 不应命中普通检索答案缓存，避免用户勾选后复用浅检索结果。"""
+    repository = KnowledgeBaseRepository(str(tmp_path / "kb.sqlite"))
+    kb = repository.create_knowledge_base("Java", "notes", "u1")
+    repository.update_knowledge_base_status(kb["id"], "published")
+    answer_cache = AnswerCacheService(repository, ttl_seconds=3600)
+    answer_cache.set(
+        input_text="JMM 访问策略",
+        knowledge_base_ids=[kb["id"]],
+        top_k=5,
+        answer="普通缓存答案",
+        citations=[{"chunk_id": "chunk-cache"}],
+        trace=[],
+        request_id="req-cache",
+        temperature=0.2,
+    )
+
+    class FakeRetrievalService:
+        def __init__(self):
+            self.calls = 0
+
+        def build_retrieval_query(self, input_text, use_context=False, history_questions=None):
+            return input_text
+
+        async def deep_search_with_engines(self, **kwargs):
+            self.calls += 1
+            return {
+                "request_id": kwargs["request_id"],
+                "results": [{"chunk_id": "chunk-deep", "document_name": "jmm.md", "title": "JMM", "content": "深度证据"}],
+                "trace": [],
+                "deep_search": {
+                    "intent": "JMM 访问策略",
+                    "cot_plan": ["拆分访问策略问题"],
+                    "sub_questions": ["JMM 访问策略是什么？"],
+                    "steps": [{"index": 1, "sub_question": "JMM 访问策略是什么？", "hit_count": 1, "top_hits": []}],
+                },
+            }
+
+    class FakeAnswerService:
+        async def stream_synthesize(self, query, results, temperature=0.2):
+            yield {"text": "DeepSearch 新答案", "chunk_id": "chunk-deep"}
+
+    retrieval_service = FakeRetrievalService()
+    events = [
+        event async for event in _stream_retrieval_events(
+            RetrievalSDKSearchRequest(
+                input="JMM 访问策略",
+                knowledge_base_ids=[kb["id"]],
+                top_k=5,
+                deep_search_enabled=True,
+            ),
+            run_id=None,
+            retrieval_service=retrieval_service,
+            answer_service=FakeAnswerService(),
+            answer_cache=answer_cache,
+            request_id="req-deep-cache",
+            delta_sleep=lambda seconds: _noop_sleep(),
+        )
+    ]
+
+    assert retrieval_service.calls == 1
+    assert not any("answer_cache_hit" in event for event in events)
+    assert any("DeepSearch 新答案" in event for event in events)
 
 
 @pytest.mark.asyncio
@@ -702,6 +897,72 @@ async def test_retrieval_stream_reuses_cached_answer_for_normalized_question(tmp
     assert answer_service.calls == 1
     assert any("answer_cache_hit" in event for event in second_events)
     assert any("JMM 缓存答案" in event for event in second_events)
+
+
+@pytest.mark.asyncio
+async def test_cached_retrieval_stream_still_emits_recommendations(monkeypatch, tmp_path):
+    """答案缓存命中时也应在完成事件后补发推荐事件。"""
+    repository = KnowledgeBaseRepository(str(tmp_path / "kb.sqlite"))
+    kb = repository.create_knowledge_base("Java", "notes", "u1")
+    repository.update_knowledge_base_status(kb["id"], "published")
+    answer_cache = AnswerCacheService(repository, ttl_seconds=3600)
+    answer_cache.set(
+        input_text="适配器模式干啥的",
+        knowledge_base_ids=[kb["id"]],
+        top_k=5,
+        answer="适配器模式用于解决接口不兼容问题。",
+        citations=[{
+            "chunk_id": "chunk-1",
+            "document_id": "doc-1",
+            "document_name": "适配器模式.md",
+            "title": "模式定义",
+            "content": "适配器模式用于解决接口不兼容问题。",
+        }],
+        trace=[],
+        request_id="req-seed",
+        temperature=0.2,
+    )
+
+    class FakeRetrievalService:
+        async def search_with_engines(self, **kwargs):
+            raise AssertionError("缓存命中时不应再次检索")
+
+    class FakeAnswerService:
+        async def stream_synthesize(self, query, results):
+            raise AssertionError("缓存命中时不应再次生成答案")
+
+    class FastRecommendationService:
+        async def build(self, **kwargs):
+            return [{
+                "metadata": {"id": "doc-2", "document_name": "六边形架构详解.md"},
+                "description": "继续看端口与适配器架构。",
+                "score": 0.91,
+                "features": {"category": "topic_document", "tags": ["软件工程", "系统架构设计"]},
+                "reason": "上位主题资料",
+                "kind": "document",
+                "topic_path": ["软件工程", "系统架构设计", "端口与适配器架构"],
+            }]
+
+    monkeypatch.setattr(
+        "app.routers.retrieval_stream._get_topic_recommendation_service",
+        lambda: FastRecommendationService(),
+    )
+
+    events = [
+        event async for event in _stream_retrieval_events(
+            RetrievalSDKSearchRequest(input="适配器模式干啥的", knowledge_base_ids=[kb["id"]], top_k=5),
+            run_id=None,
+            retrieval_service=FakeRetrievalService(),
+            answer_service=FakeAnswerService(),
+            answer_cache=answer_cache,
+            request_id="req-cache-reco",
+            delta_sleep=lambda seconds: _noop_sleep(),
+        )
+    ]
+    event_names = [_event_name(event) for event in events]
+
+    assert "recommendation.completed" in event_names
+    assert event_names.index("answer.completed") < event_names.index("recommendation.completed")
 
 
 @pytest.mark.asyncio
@@ -884,6 +1145,11 @@ def _event_payload(events: list[str], event_name: str) -> dict:
         data_line = next(line for line in event.splitlines() if line.startswith("data: "))
         return json.loads(data_line.removeprefix("data: "))["payload"]
     raise AssertionError(f"event not found: {event_name}")
+
+
+def _event_name(event: str) -> str:
+    """从 SSE 文本事件中提取 event 名称。"""
+    return next(line for line in event.splitlines() if line.startswith("event: ")).removeprefix("event: ")
 
 
 def _last_request_id(sse_text: str) -> str:

@@ -79,6 +79,9 @@ class Config:
     RAG_RERANK_SKIP_MIN_GAP: float = float(os.getenv("RAG_RERANK_SKIP_MIN_GAP", "0.018"))
     RAG_OPTIMIZE_QUERY_LIMIT: int = int(os.getenv("RAG_OPTIMIZE_QUERY_LIMIT", "2"))
     RAG_RECOMMENDATION_TOP_K: int = int(os.getenv("RAG_RECOMMENDATION_TOP_K", "3"))
+    RAG_RECOMMENDATION_TIMEOUT_MS: int = int(os.getenv("RAG_RECOMMENDATION_TIMEOUT_MS", "180"))
+    STREAM_DELTA_DELAY_SECONDS: float = float(os.getenv("STREAM_DELTA_DELAY_SECONDS", "0.024"))
+    KNOWLEDGE_BASE_EMBEDDING_BATCH_SIZE: int = int(os.getenv("KNOWLEDGE_BASE_EMBEDDING_BATCH_SIZE", "8"))
     RERANK_THRESHOLD: float = float(os.getenv("RERANK_THRESHOLD", "0.7"))
     RAG_STATE_DB_PATH: str = os.getenv("RAG_STATE_DB_PATH", "")
     RAG_GRAPH_REBUILD_ON_STARTUP: bool = os.getenv("RAG_GRAPH_REBUILD_ON_STARTUP", "false").lower() == "true"

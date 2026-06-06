@@ -1,4 +1,5 @@
 import json
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -154,3 +155,51 @@ async def test_optimize_stream_emits_failed_event_when_optimizer_fails(async_cli
     payload = json.loads(data_line)["payload"]
     assert payload["stage"] == "query.optimize"
     assert "secret" not in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_optimize_stream_emits_answer_completed_before_slow_recommendations(async_client, monkeypatch):
+    """优化检索流不应因为慢推荐而延迟 answer.completed。"""
+    async def fake_optimize(query):
+        return {
+            "intent": "design-pattern",
+            "optimized_query": "适配器模式",
+            "expanded_queries": ["适配器模式"],
+            "query_scope": "local",
+            "route_plan": {"strategy": "local_chunk", "steps": ["chunk_retrieval"]},
+            "see_trace": [],
+            "fallback_used": False,
+        }
+
+    async def fake_pipeline(user_id, request, prefetched_query_vector=None, retrieval_context=None, request_id=None):
+        return SearchPipelineResult(
+            results=[
+                SearchResult(
+                    metadata={"id": request.input, "type": "skill"},
+                    description=request.input,
+                    score=0.88,
+                )
+            ],
+            profile={"counts": {"filtered": 1}, "fallbacks": {}, "rerank_decision": {"skipped": True}},
+        )
+
+    def slow_recommendations(*args, **kwargs):
+        time.sleep(0.05)
+        return []
+
+    monkeypatch.setattr("app.routers.rag_stream.get_query_optimize_service", lambda: AsyncMock(optimize=fake_optimize))
+    monkeypatch.setattr("app.routers.rag_stream.run_search_pipeline_with_profile", fake_pipeline)
+    monkeypatch.setattr("app.routers.rag_stream._build_recommendations", slow_recommendations)
+    monkeypatch.setattr("app.routers.rag_stream.Config.RAG_RECOMMENDATION_TIMEOUT_MS", 1, raising=False)
+
+    response = await async_client.post(
+        "/api/v1/rag/u001/search/optimize/stream",
+        json={"input": "适配器模式干啥的", "type": "all", "topK": 5},
+    )
+    events = [
+        json.loads(block.split("data: ", 1)[1])["event"]
+        for block in response.text.strip().split("\n\n")
+        if "data: " in block
+    ]
+
+    assert events.index("answer.completed") < events.index("recommendation.skipped")
