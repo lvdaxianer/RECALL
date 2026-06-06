@@ -131,31 +131,77 @@ function RecommendationCardList({
       <p className="text-xs font-medium text-slate-500">{title}</p>
       <div className="grid gap-2">
         {cards.map((item, index) => (
-          <article
-            key={`${title}-${getRecommendationTitle(item)}-${index}`}
-            className="rounded-lg border border-white/80 bg-white px-3 py-2 shadow-xs"
-          >
-            <div className="flex items-start gap-2">
-              <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-md bg-slate-50 text-slate-500">
-                {icon === "document" ? (
-                  <BookOpen aria-hidden="true" className="size-3.5" />
-                ) : (
-                  <Compass aria-hidden="true" className="size-3.5" />
-                )}
-              </span>
-              <div className="min-w-0">
-                <h4 className="break-words text-sm font-medium text-slate-900">
-                  {getRecommendationTitle(item)}
-                </h4>
-                {item.reason ? <p className="mt-0.5 text-xs text-slate-500">{item.reason}</p> : null}
-                {Array.isArray(item.topic_path) && item.topic_path.length > 0 ? (
-                  <p className="mt-1 text-[11px] text-slate-400">{item.topic_path.join(TOPIC_PATH_SEPARATOR)}</p>
-                ) : null}
-              </div>
-            </div>
-          </article>
+          <RecommendationItemCard icon={icon} item={item} key={`${title}-${getRecommendationTitle(item)}-${index}`} />
         ))}
       </div>
     </div>
   );
+}
+
+/**
+ * 单张推荐卡片。
+ *
+ * @param props - item 为推荐数据，icon 为图标类型
+ * @returns 推荐卡片 UI
+ * @author lvdaxianerplus
+ * @date 2026-06-06
+ */
+function RecommendationItemCard({ item, icon }: { item: RecommendationCard; icon: "document" | "topic" }) {
+  return (
+    <article className="rounded-lg border border-white/80 bg-white px-3 py-2 shadow-xs">
+      <div className="flex items-start gap-2">
+        <RecommendationIcon icon={icon} />
+        <RecommendationCardContent item={item} />
+      </div>
+    </article>
+  );
+}
+
+/**
+ * 推荐卡片图标。
+ *
+ * @param props - icon 为图标类型
+ * @returns 图标 UI
+ * @author lvdaxianerplus
+ * @date 2026-06-06
+ */
+function RecommendationIcon({ icon }: { icon: "document" | "topic" }) {
+  const Icon = icon === "document" ? BookOpen : Compass;
+  return (
+    <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-md bg-slate-50 text-slate-500">
+      <Icon aria-hidden="true" className="size-3.5" />
+    </span>
+  );
+}
+
+/**
+ * 推荐卡片正文。
+ *
+ * @param props - item 为推荐数据
+ * @returns 推荐卡片正文 UI
+ * @author lvdaxianerplus
+ * @date 2026-06-06
+ */
+function RecommendationCardContent({ item }: { item: RecommendationCard }) {
+  return (
+    <div className="min-w-0">
+      <h4 className="break-words text-sm font-medium text-slate-900">{getRecommendationTitle(item)}</h4>
+      {item.reason ? <p className="mt-0.5 text-xs text-slate-500">{item.reason}</p> : undefined}
+      <TopicPath path={item.topic_path} />
+    </div>
+  );
+}
+
+/**
+ * 主题路径。
+ *
+ * @param props - path 为主题路径
+ * @returns 主题路径 UI；空路径时不渲染
+ * @author lvdaxianerplus
+ * @date 2026-06-06
+ */
+function TopicPath({ path }: { path?: string[] }) {
+  return Array.isArray(path) && path.length > 0 ? (
+    <p className="mt-1 text-[11px] text-slate-400">{path.join(TOPIC_PATH_SEPARATOR)}</p>
+  ) : undefined;
 }
