@@ -88,11 +88,16 @@ install_deps() {
 start_backend() {
   stop_pid "backend" "$BACKEND_PID_FILE"
   ensure_venv
-  log "启动后端 FastAPI (uvicorn) :$PORT_BACKEND → $BACKEND_LOG"
+  log "启动后端 FastAPI (uvicorn + 热重载) :$PORT_BACKEND → $BACKEND_LOG"
+  # 仅监控 app/ scripts/ requirements.txt 等源码目录
+  # 排除 .venv/ var/ __pycache__/ data/ tests/ 等无关目录
   (
     cd "$ROOT_DIR"
     nohup "$ROOT_DIR/.venv/bin/python" -m uvicorn app.main:app \
       --host 0.0.0.0 --port "$PORT_BACKEND" --reload \
+      --reload-dir app \
+      --reload-include '*.py' \
+      --reload-exclude 'var/*' \
       > "$BACKEND_LOG" 2>&1 &
     echo $! > "$BACKEND_PID_FILE"
   )

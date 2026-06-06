@@ -22,6 +22,40 @@
 
 停止时按 PID 文件清理。如端口被占可 `PORT_BACKEND=9000 ./start.sh`。
 
+## 🔥 热更新（默认开启）
+
+| 服务 | 触发方式 | 生效内容 |
+|------|----------|----------|
+| 前端 Vite HMR | 编辑 `web/src/**` 任一文件 | 浏览器自动热替换（无刷新） |
+| 后端 uvicorn --reload | 编辑 `app/**` 任一 `.py` 文件 | 服务自动重启并重新加载 |
+
+### 后端热更新细节
+
+- 仅监控 `app/` 目录 + `*.py` 文件（用 `--reload-dir app --reload-include '*.py'`）
+- 自动排除 `.venv/ var/ __pycache__/ data/ tests/` 等无关目录
+- 触发时机：保存 `.py` 文件后 1-2 秒内重启
+- 重启过程中 SSE 流会断开，前端会自动重连
+
+### 前端热更新细节
+
+- Vite HMR 通过 WebSocket 在 5173 端口通讯
+- 仅监控 `web/src/**` + `web/index.html` + 配置文件
+- 自动排除 `node_modules/ dist/ .git/` 等无关目录
+- 触发时机：保存文件后浏览器立即热替换
+- 编辑 `.tsx` 组件时，React 状态默认保留；编辑样式（CSS/Tailwind）即时生效
+- 错误时浏览器右上角弹出覆盖层（`hmr.overlay: true`）
+
+### 验证热更新
+
+```bash
+# 后端
+echo "# test" >> app/main.py     # 观察 var/backend.log 出现 "Detected change"
+                                  # 以及 "Watcher stopped" → "Watcher started"
+
+# 前端
+echo "// test" >> web/src/main.tsx # 浏览器 console 立即出现 [vite] hmr update
+```
+
 ## 方式 B：手动
 
 ### 后端（FastAPI）
