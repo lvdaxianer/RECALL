@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- code-review-spec 全套整改（拆分+注释+模式修复） (6c78ac7)
+
+- code-review-spec 全套整改（拆分+注释+模式修复） (2b24be9)
+
 ### Added
 - 实现高精度 RAG 系统完整架构 (de49642)
 - 实现特征标签增强的语义检索 (9e71eaf)

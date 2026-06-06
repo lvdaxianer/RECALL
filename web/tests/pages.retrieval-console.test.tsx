@@ -4,7 +4,33 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RetrievalConsolePage } from "../src/features/retrieval/RetrievalConsolePage";
 
+class TestResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+Object.defineProperty(globalThis, "ResizeObserver", {
+  configurable: true,
+  value: TestResizeObserver,
+});
+Object.defineProperty(window, "ResizeObserver", {
+  configurable: true,
+  value: TestResizeObserver,
+});
+Element.prototype.scrollIntoView = vi.fn();
+
 describe("retrieval console", () => {
+  it("exposes one page heading and retrieval metrics", () => {
+    render(<RetrievalConsolePage />);
+
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 1, name: "检索控制台" })).toBeInTheDocument();
+    expect(screen.getByText("summary-first")).toBeInTheDocument();
+    expect(screen.getByText("query scope")).toBeInTheDocument();
+    expect(screen.getByText("SSE events")).toBeInTheDocument();
+  });
+
   it("renders knowledge base multiselect and stream controls", () => {
     render(<RetrievalConsolePage />);
 
@@ -12,9 +38,11 @@ describe("retrieval console", () => {
     expect(screen.getByText("summary-first")).toBeInTheDocument();
     expect(screen.getByText("query scope")).toBeInTheDocument();
     expect(screen.getByText("检索控制台")).toBeInTheDocument();
-    expect(screen.getByText("知识库范围")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "选择知识库" })).toBeInTheDocument();
+    expect(screen.getByText(/已选择 0 个/)).toBeInTheDocument();
     expect(screen.getByText("开始流式检索")).toBeInTheDocument();
     expect(screen.getByText("流式输出")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "流式回答状态" })).toBeInTheDocument();
     expect(screen.getByText("Trace")).toBeInTheDocument();
   });
 
@@ -35,9 +63,10 @@ describe("retrieval console", () => {
     );
 
     render(<RetrievalConsolePage />);
-    await screen.findByText("已发布 KB");
-    expect(screen.getByLabelText("草稿 KB")).toBeDisabled();
-    fireEvent.click(screen.getByLabelText("已发布 KB"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "选择知识库" })).toHaveTextContent("已发布 KB"));
+    fireEvent.click(screen.getByRole("combobox", { name: "选择知识库" }));
+    expect(await screen.findByRole("option", { name: /草稿 KB/ })).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("option", { name: /已发布 KB/ }));
     fireEvent.change(screen.getByLabelText("问题"), { target: { value: "检索" } });
     fireEvent.click(screen.getByText("开始流式检索"));
 
@@ -62,7 +91,7 @@ describe("retrieval console", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<RetrievalConsolePage />);
-    await screen.findByText("已发布 KB");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "选择知识库" })).toHaveTextContent("已发布 KB"));
     fireEvent.change(screen.getByLabelText("问题"), { target: { value: "检索" } });
     fireEvent.click(screen.getByText("开始流式检索"));
 
@@ -89,7 +118,7 @@ describe("retrieval console", () => {
     );
 
     render(<RetrievalConsolePage />);
-    await screen.findByText("已发布 KB");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "选择知识库" })).toHaveTextContent("已发布 KB"));
     fireEvent.change(screen.getByLabelText("问题"), { target: { value: "检索" } });
     fireEvent.click(screen.getByText("开始流式检索"));
 
@@ -118,7 +147,7 @@ describe("retrieval console", () => {
     );
 
     render(<RetrievalConsolePage />);
-    await screen.findByText("已发布 KB");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "选择知识库" })).toHaveTextContent("已发布 KB"));
     fireEvent.change(screen.getByLabelText("问题"), { target: { value: "检索" } });
     fireEvent.click(screen.getByText("开始流式检索"));
 

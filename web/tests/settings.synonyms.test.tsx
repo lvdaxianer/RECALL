@@ -5,6 +5,25 @@ import { describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "../src/features/settings/SettingsPage";
 
 describe("SettingsPage synonyms", () => {
+  it("keeps the answer cache table stable when cache response is empty or malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/v1/retrieval/answers/cache") {
+          return new Response(JSON.stringify({ data: [] }));
+        }
+        return new Response(JSON.stringify({ data: [] }));
+      }),
+    );
+
+    render(<SettingsPage />);
+
+    expect(screen.getByRole("table", { name: "答案缓存" })).toBeInTheDocument();
+    expect(await screen.findByText("暂无答案缓存")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
   it("creates edits disables and deletes synonym groups", async () => {
     let groups: Array<{
       id: string;
@@ -44,11 +63,18 @@ describe("SettingsPage synonyms", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
+    // v1.5: 设置子菜单搬到 AppShell 侧栏；本页只剩表单。
+    // 测试里通过 hash 路由直接跳到同义词 tab（模拟用户点侧栏链接）。
+    window.location.hash = "#设置/同义词";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
     render(<SettingsPage />);
-    fireEvent.click(screen.getByRole("button", { name: "同义词" }));
+    // 此时应渲染同义词面板（标准词 / 同义词输入）
+    expect(await screen.findByLabelText("标准词")).toBeInTheDocument();
+    expect(screen.getByLabelText("同义词")).toBeInTheDocument();
 
     fireEvent.change(await screen.findByLabelText("标准词"), { target: { value: "作用" } });
-    fireEvent.change(screen.getByLabelText("同义词条"), { target: { value: "干啥用的, 有什么作用" } });
+    expect(screen.getByLabelText("同义词")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("同义词"), { target: { value: "干啥用的, 有什么作用" } });
     fireEvent.click(screen.getByRole("button", { name: "创建同义词组" }));
 
     expect(await screen.findByText("作用")).toBeInTheDocument();

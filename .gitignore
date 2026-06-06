@@ -21,6 +21,7 @@ docs/superpowers/*
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-06-03-ragflow-retrieval-optimization-study-and-migration-plan.md
 .pytest*
+var
 node_modules/
 web/node_modules/
 web/dist/

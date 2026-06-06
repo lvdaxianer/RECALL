@@ -1,22 +1,64 @@
+/**
+ * Recall · design tokens (v1.1 · emerald)
+ * 浅色为主；暗色 token 预留，PR1 不启用。
+ * 与 Tailwind 4 的 @theme 暴露对齐；shadcn 变量在 global.css 中独立维护。
+ *
+ * @author lvdaxianerplus
+ */
 :root {
   color-scheme: light;
-  --color-bg: #f8fafc;
-  --color-surface: #ffffff;
-  --color-surface-raised: #fdfefe;
-  --color-border: #e2e8f0;
-  --color-border-strong: #cbd5e1;
-  --color-text: #0f172a;
-  --color-muted: #475569;
-  --color-primary: #0369a1;
-  --color-primary-strong: #075985;
-  --color-primary-soft: #e0f2fe;
-  --color-accent: #0f766e;
-  --color-accent-soft: #ccfbf1;
-  --color-danger: #b42318;
-  --shadow-soft: 0 18px 44px rgba(15, 23, 42, 0.07);
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 28px rgba(15, 23, 42, 0.05);
-  --shadow-popover: 0 28px 80px rgba(15, 23, 42, 0.18);
-  --radius-card: 8px;
-  --radius-control: 8px;
-  font-family: "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
+
+  /* Surface */
+  --color-bg:              #F7F8FA;
+  --color-surface:         #FFFFFF;
+  --color-surface-raised:  #FFFFFF;
+  --color-surface-sunken:  #F1F3F7;
+  --color-border:          #E4E7EC;
+  --color-border-strong:   #CDD2DA;
+
+  /* Text */
+  --color-text:            #0F172A;
+  --color-muted:           #475569;
+  --color-subtle:          #94A3B8;
+
+  /* Brand — emerald */
+  --color-primary:         #059669;
+  --color-primary-strong:  #047857;
+  --color-primary-soft:    #ECFDF5;
+
+  /* Accent — indigo (第二强调) */
+  --color-accent:          #4F46E5;
+  --color-accent-soft:     #EEF2FF;
+
+  /* Status */
+  --color-success:         #059669;
+  --color-success-soft:    #ECFDF5;
+  --color-warning:         #D97706;
+  --color-warning-soft:    #FFFBEB;
+  --color-danger:          #DC2626;
+  --color-danger-soft:     #FEF2F2;
+  --color-info:            #0284C7;
+  --color-info-soft:       #F0F9FF;
+
+  /* Shape & elevation — v1.2 4 级 elevation */
+  --radius-card:           12px;
+  --radius-control:        8px;
+  --shadow-xs:             0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-sm:             0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md:             0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --shadow-lg:             0 10px 25px rgba(15, 23, 42, 0.10), 0 4px 10px rgba(15, 23, 42, 0.04);
+  --shadow-xl:             0 25px 50px rgba(15, 23, 42, 0.18), 0 8px 16px rgba(15, 23, 42, 0.06);
+  /* 旧名保留兼容（PR1 期间用过） */
+  --shadow-soft:           var(--shadow-xs);
+  --shadow-card:           var(--shadow-sm);
+  --shadow-popover:        var(--shadow-lg);
+
+  /* Type — 本地加载 Inter Variable + JetBrains Mono Variable */
+  font-family:
+    "Inter Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

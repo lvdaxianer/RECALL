@@ -5,52 +5,23 @@ import { describe, expect, it, vi } from "vitest";
 import { DocumentIngestPage } from "../src/features/documents/DocumentIngestPage";
 
 describe("DocumentIngestPage", () => {
-  it("shows document parse status and failure reason", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url === "/api/v1/kb") {
-          return new Response(JSON.stringify({
-            data: [
-              {
-                id: "kb-001",
-                name: "产品知识库",
-                description: "产品资料",
-                owner_id: "u1",
-                status: "published",
-              },
-            ],
-          }));
-        }
-        if (url === "/api/v1/kb/kb-001/documents") {
-          return new Response(JSON.stringify({
-            data: [
-              {
-                id: "doc-001",
-                knowledge_base_id: "kb-001",
-                document_name: "a.md",
-                content_type: "text/markdown",
-                status: "failed",
-                chunk_count: 0,
-                parse_status: "failed",
-                parse_attempts: 3,
-                parse_error: "parse exploded",
-              },
-            ],
-          }));
-        }
-        return new Response(JSON.stringify({ data: [] }));
-      }),
-    );
-
+  it("exposes one page heading and document intake metrics", () => {
     render(<DocumentIngestPage />);
 
-    expect(await screen.findByText("文档解析状态")).toBeInTheDocument();
-    expect(await screen.findByText("a.md")).toBeInTheDocument();
-    expect(screen.getByText("失败")).toBeInTheDocument();
-    expect(screen.getByText("3/3 次")).toBeInTheDocument();
-    expect(screen.getByText("parse exploded")).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 1, name: "文档录入" })).toBeInTheDocument();
+    expect(screen.getByText("Markdown only")).toBeInTheDocument();
+    expect(screen.getByText("ES / Milvus")).toBeInTheDocument();
+    expect(screen.getByText("draft to release")).toBeInTheDocument();
+  });
 
-    vi.unstubAllGlobals();
+  // v1.4: 文档解析状态已从本页移除（用户改去 KB 详情看）。
+  // 改为验证"录入规则"里指引文案，引导到 KB 详情查看进度。
+  it("directs users to the KB detail page for document parse status", () => {
+    render(<DocumentIngestPage />);
+
+    expect(screen.getByText("录入规则")).toBeInTheDocument();
+    expect(screen.getByText(/知识库.*文档列表/)).toBeInTheDocument();
+    expect(screen.queryByText("文档解析状态")).not.toBeInTheDocument();
   });
 });

@@ -1,8 +1,16 @@
 import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 
 import { App } from "../src/app/App";
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+globalThis.ResizeObserver ??= ResizeObserverStub;
 
 function stubKnowledgeBases() {
   vi.stubGlobal(
@@ -81,12 +89,58 @@ function makeEvent(eventId: string, event: string, payload: Record<string, unkno
 }
 
 describe("app shell and chat assistant", () => {
+  // v1.4: App 用 hash 路由，测试间清空 hash 让每个用例从默认首页开始。
+  beforeEach(() => {
+    if (typeof window !== "undefined" && window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  });
+
+  it("closes the mobile sidebar after navigation so main actions remain reachable", async () => {
+    const originalInnerWidth = window.innerWidth;
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query.includes("767"),
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    stubKnowledgeBases();
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "切换主导航" }));
+    fireEvent.click(screen.getByRole("link", { name: "答案缓存" }));
+
+    expect(await screen.findByRole("button", { name: "打开 Recall 助手" })).toBeInTheDocument();
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+    window.matchMedia = originalMatchMedia;
+    vi.unstubAllGlobals();
+  });
+
+  it("renders accessible app shell navigation with icon labels", async () => {
+    stubKnowledgeBases();
+
+    render(<App />);
+
+    expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开 Recall 助手" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /知识库/ })).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
   it("defaults to a product home page that explains the RAG retrieval flow", () => {
     stubKnowledgeBases();
 
     render(<App />);
 
-    expect(screen.getByRole("button", { name: "首页" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "Recall RAG 检索流程" })).toBeInTheDocument();
     expect(screen.getByText("Query Scope")).toBeInTheDocument();
     expect(screen.getByText("Summary-first")).toBeInTheDocument();
@@ -130,20 +184,17 @@ describe("app shell and chat assistant", () => {
     render(<App />);
 
     expect(screen.getByRole("banner")).toHaveTextContent("Recall");
-    expect(screen.getByText("Retrieval Operations")).toBeInTheDocument();
-    expect(screen.getByText("Retrieval SDK")).toBeInTheDocument();
-    expect(screen.getByText("ES / Milvus / Rerank")).toBeInTheDocument();
-    expect(screen.getByText("SSE Ready")).toBeInTheDocument();
-    expect(screen.getByText("知识工作台")).toBeInTheDocument();
-    expect(screen.getByText("检索与评测")).toBeInTheDocument();
-    expect(screen.getByText("仅发布库参与问答")).toBeInTheDocument();
+    // v1.1 顶栏：合并的 SDK 状态徽章
+    expect(screen.getByText("SDK Ready")).toBeInTheDocument();
+    // v1.1 侧栏：扁平化导航 + 品牌副标题
+    expect(screen.getAllByText("知识库检索控制台").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "新建知识库" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "首页" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "知识库管理" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "文档录入" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "检索调试" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "效果评测" })).toBeInTheDocument();
-    expect(screen.getByText("Evidence Rail")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "首页" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "知识库管理" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "文档录入" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "检索调试" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "效果评测" })).toBeInTheDocument();
 
     vi.unstubAllGlobals();
   });
@@ -173,7 +224,7 @@ describe("app shell and chat assistant", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "文档录入" }));
+    fireEvent.click(screen.getByRole("link", { name: "文档录入" }));
 
     expect(await screen.findByRole("heading", { name: "文档录入" })).toBeInTheDocument();
     expect(screen.getByText("Document Intake")).toBeInTheDocument();
@@ -243,7 +294,7 @@ describe("app shell and chat assistant", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "效果评测" }));
+    fireEvent.click(screen.getByRole("link", { name: "效果评测" }));
 
     expect(await screen.findByRole("heading", { name: "效果评测" })).toBeInTheDocument();
     expect(screen.getByText("Retrieval Evaluation")).toBeInTheDocument();
@@ -276,8 +327,10 @@ describe("app shell and chat assistant", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Recall 助手" });
     expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByText("Retrieval Copilot")).toBeInTheDocument();
-    expect(within(dialog).getByText("证据优先回答")).toBeInTheDocument();
+    expect(dialog).toHaveAttribute("data-assistant-ui-runtime", "local");
+    expect(within(dialog).getByRole("textbox", { name: "输入问题" })).toBeInTheDocument();
+    expect(within(dialog).getByText("Recall 助手")).toBeInTheDocument();
+    expect(within(dialog).getByText("证据优先")).toBeInTheDocument();
     expect(within(dialog).getByText("会话")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "新建会话" })).toBeInTheDocument();
     fireEvent.click(await within(dialog).findByRole("button", { name: /知识库范围/ }));
@@ -293,15 +346,12 @@ describe("app shell and chat assistant", () => {
     await waitFor(() => expect(within(dialog).getAllByText(/可以这样配置/).length).toBeGreaterThan(0));
     expect(await within(dialog).findByText(/耗时/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "查看证据与 Trace" }));
-    expect(await screen.findByRole("dialog", { name: "证据与 Trace" })).toBeInTheDocument();
-    expect(screen.getByText("引用来源")).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "文档" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "标题" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "分数" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "guide.md" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "ES 过滤字段" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "0.920" })).toBeInTheDocument();
-    expect(screen.getAllByText("knowledge_base_id 需要同时写入 ES 与 Milvus 过滤字段。").length).toBeGreaterThan(0);
+    // v1.3: 证据面板内联在右栏，不开新 dialog
+    expect(await within(dialog).findByText("证据 & Trace")).toBeInTheDocument();
+    expect(within(dialog).getByText("guide.md")).toBeInTheDocument();
+    expect(within(dialog).getByText("ES 过滤字段")).toBeInTheDocument();
+    expect(within(dialog).getByText("0.920")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("knowledge_base_id 需要同时写入 ES 与 Milvus 过滤字段。").length).toBeGreaterThan(0);
 
     vi.unstubAllGlobals();
   });
@@ -412,7 +462,6 @@ describe("app shell and chat assistant", () => {
 
     expect(await within(dialog).findByText("思考中")).toBeInTheDocument();
     expect(await within(dialog).findByText("正在判断这个问题适合怎么查")).toBeInTheDocument();
-    expect(within(dialog).getByText("检索中，请稍候…")).toBeInTheDocument();
     expect(within(dialog).queryByText(/stage:/)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "点赞这条回答" }));
     expect(await within(dialog).findByText("反馈会在回答完成后提交")).toBeInTheDocument();
@@ -464,12 +513,13 @@ describe("app shell and chat assistant", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("link", { name: "答案缓存" }));
 
-    expect(await screen.findByRole("heading", { name: "系统设置" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "答案缓存" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: "重排缓存" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "模型配置" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "答案缓存管理" })).toBeInTheDocument();
+    // v1.5: 设置子菜单是独立 <a>（hash 路由），role 变成 link
+    expect(screen.getByRole("link", { name: "答案缓存" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "重排缓存" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "模型配置" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "答案缓存管理" })).toBeInTheDocument();
     expect(screen.getByText("jmm 访问策略是啥")).toBeInTheDocument();
     expect(screen.getByText("命中 8 次")).toBeInTheDocument();
@@ -496,10 +546,10 @@ describe("app shell and chat assistant", () => {
     }));
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "模型配置" }));
+    fireEvent.click(screen.getByRole("link", { name: "答案缓存" }));
+    fireEvent.click(await screen.findByRole("link", { name: "模型配置" }));
 
-    expect(screen.getByRole("button", { name: "模型配置" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "模型配置" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "模型配置" })).toBeInTheDocument();
     expect(screen.getByText("该设置模块已预留，后续接入真实配置。")).toBeInTheDocument();
     vi.unstubAllGlobals();
@@ -534,14 +584,14 @@ describe("app shell and chat assistant", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开 Recall 助手" }));
     const dialog = screen.getByRole("dialog", { name: "Recall 助手" });
 
-    expect(await within(dialog).findByRole("option", { name: "ES 过滤调试" })).toBeInTheDocument();
+    expect(await within(dialog).findByRole("button", { name: /ES 过滤调试/ })).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "新建会话" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/agent/default/sessions",
       expect.objectContaining({ method: "POST" }),
     ));
-    expect(await within(dialog).findByRole("option", { name: "新的检索会话" })).toBeInTheDocument();
+    expect(await within(dialog).findByRole("button", { name: /新的检索会话/ })).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 
@@ -594,11 +644,12 @@ describe("app shell and chat assistant", () => {
     expect(within(dialog).getByText("历史回答")).toBeInTheDocument();
     expect(within(dialog).queryByText("已完成思考")).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "查看证据与 Trace" }));
-    expect(await screen.findByRole("dialog", { name: "证据与 Trace" })).toBeInTheDocument();
-    expect(screen.getByText("查询范围")).toBeInTheDocument();
-    expect(screen.getAllByText("识别为本地检索").length).toBeGreaterThan(0);
-    expect(screen.getByText("命中片段")).toBeInTheDocument();
-    expect(screen.getByText("历史命中正文")).toBeInTheDocument();
+    // v1.3: 证据面板内联在右栏
+    expect(await within(dialog).findByText("证据 & Trace")).toBeInTheDocument();
+    expect(within(dialog).getByText("查询范围")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("识别为本地检索").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("命中片段")).toBeInTheDocument();
+    expect(within(dialog).getByText("历史命中正文")).toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText("输入问题"), { target: { value: "新问题" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "发送" }));
 
@@ -711,15 +762,14 @@ describe("app shell and chat assistant", () => {
     expect(within(dialog).queryByText("引用来源")).not.toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "查看证据与 Trace" }));
-    expect(await screen.findByRole("dialog", { name: "证据与 Trace" })).toBeInTheDocument();
-    expect(screen.getByText("引用来源")).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "文档" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "guide.md" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "Markdown 渲染" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "0.880" })).toBeInTheDocument();
-    expect(screen.getAllByText("Markdown 片段命中内容").length).toBeGreaterThan(0);
-    expect(screen.getByText("查询范围")).toBeInTheDocument();
-    expect(screen.getAllByText("识别为知识库问答").length).toBeGreaterThan(0);
+    // v1.3: 证据面板内联在右栏
+    expect(await within(dialog).findByText("证据 & Trace")).toBeInTheDocument();
+    expect(within(dialog).getByText("guide.md")).toBeInTheDocument();
+    expect(within(dialog).getByText("Markdown 渲染")).toBeInTheDocument();
+    expect(within(dialog).getByText("0.880")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("Markdown 片段命中内容").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("查询范围")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("识别为知识库问答").length).toBeGreaterThan(0);
     vi.unstubAllGlobals();
   });
 

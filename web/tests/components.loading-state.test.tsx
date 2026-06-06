@@ -21,7 +21,8 @@ describe("common states", () => {
       </AppShell>,
     );
 
-    expect(screen.getByText("知识库检索控制台")).toBeInTheDocument();
+    // 品牌副标题与顶栏 title 都会出现 "知识库检索控制台"，使用 getAllByText。
+    expect(screen.getAllByText("知识库检索控制台").length).toBeGreaterThan(0);
     expect(screen.getByText("content")).toBeInTheDocument();
   });
 

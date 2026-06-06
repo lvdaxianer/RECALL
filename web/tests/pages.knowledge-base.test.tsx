@@ -5,6 +5,21 @@ import { describe, expect, it, vi } from "vitest";
 import { KnowledgeBaseDetailPage } from "../src/features/kb/KnowledgeBaseDetailPage";
 import { KnowledgeBaseListPage } from "../src/features/kb/KnowledgeBaseListPage";
 
+class TestResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+Object.defineProperty(globalThis, "ResizeObserver", {
+  configurable: true,
+  value: TestResizeObserver,
+});
+Object.defineProperty(window, "ResizeObserver", {
+  configurable: true,
+  value: TestResizeObserver,
+});
+
 describe("knowledge base pages", () => {
   it("renders list controls", () => {
     render(<KnowledgeBaseListPage />);
@@ -49,7 +64,6 @@ describe("knowledge base pages", () => {
     expect(screen.getByText("1 个待发版")).toBeInTheDocument();
     expect(screen.getByText("已发布")).toBeInTheDocument();
     expect(screen.getByText("有未发布变更")).toBeInTheDocument();
-    expect(screen.getAllByText("发版状态").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "查看文档 产品知识库" })).toBeInTheDocument();
     expect(screen.queryByText("选择知识库查看文档")).not.toBeInTheDocument();
     expect(screen.queryByText(longKbId)).not.toBeInTheDocument();
@@ -122,9 +136,13 @@ describe("knowledge base pages", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<KnowledgeBaseListPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "设置 产品知识库" }));
+    fireEvent.click(await screen.findByRole("button", { name: /设置 产品知识库 知识库/ }));
 
-    expect(await screen.findByRole("dialog", { name: "产品知识库 分块设置" })).toBeInTheDocument();
+    expect(screen.queryByText("chunk size")).not.toBeInTheDocument();
+    // v1.5: KB 设置改为抽屉（Sheet），aria-label 是 "产品知识库 · 分块设置"
+    expect(await screen.findByRole("dialog", { name: /分块设置/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("Chunk size")).toHaveValue(1000);
+    expect(screen.getByLabelText("Overlap")).toHaveValue(150);
     fireEvent.change(screen.getByLabelText("Chunk size"), { target: { value: "1200" } });
     fireEvent.change(screen.getByLabelText("Overlap"), { target: { value: "180" } });
     fireEvent.click(screen.getByRole("button", { name: "保存分块设置" }));
@@ -189,8 +207,9 @@ describe("knowledge base pages", () => {
     expect(screen.queryByText("分块策略")).not.toBeInTheDocument();
     expect(screen.queryByText("Chunk 明细")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText("guide.md").length).toBeGreaterThan(0));
-    expect(screen.getByText("已入库")).toBeInTheDocument();
-    expect(screen.getByText("失败")).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "文档解析状态" })).toBeInTheDocument();
+    expect(screen.getByText("解析成功")).toBeInTheDocument();
+    expect(screen.getByText("解析失败")).toBeInTheDocument();
     expect(screen.getByText("embedding 400")).toBeInTheDocument();
     expect(screen.getAllByText("2 chunks").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "查看 guide.md 的 Chunk" }));
@@ -379,6 +398,8 @@ describe("knowledge base pages", () => {
     render(<KnowledgeBaseListPage />);
     expect(await screen.findByText("研发草稿库")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "删除知识库 研发草稿库" }));
+    expect(screen.getByRole("dialog", { name: "删除知识库" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除 研发草稿库" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/kb/kb-002?owner_id=default",

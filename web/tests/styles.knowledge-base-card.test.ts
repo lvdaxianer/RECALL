@@ -4,11 +4,11 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("knowledge base card styles", () => {
-  it("keeps knowledge base asset cards visually substantial", () => {
+  it("does not keep migrated knowledge base card styles in global CSS", () => {
     const css = readFileSync(resolve(__dirname, "../src/styles/global.css"), "utf8");
 
-    expect(css).toContain("grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));");
-    expect(css).toContain("min-height: 320px;");
-    expect(css).toContain(".kb-card-grid {\n    grid-template-columns: 1fr;\n  }");
+    expect(css).not.toContain(".kb-card");
+    expect(css).not.toContain(".kb-card-grid");
+    expect(css).not.toContain(".settings-dialog");
   });
 });

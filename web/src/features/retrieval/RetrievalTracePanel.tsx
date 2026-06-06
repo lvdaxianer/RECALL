@@ -1,89 +1,35 @@
-interface RetrievalTracePanelProps {
-  trace: Array<Record<string, unknown>>;
+/**
+ * Recall · 检索控制台 Trace 面板（轻量壳）
+ *
+ * 历史上这里有一份独立的 trace 渲染逻辑；v1.3 起直接复用 `TraceTimeline` 组件。
+ * 本文件保留为薄壳，便于将来插入"搜索/过滤"等控制项。
+ *
+ * @author lvdaxianerplus
+ */
+import { TraceTimeline } from "../../components/recall/TraceTimeline";
+
+/**
+ * 检索控制台 Trace 面板 props。
+ *
+ * @author lvdaxianerplus
+ */
+export interface RetrievalTracePanelProps {
+  /** 事件流（来自流式累积） */
+  trace: Array<{ event: string; payload?: Record<string, unknown> }>;
 }
 
-interface TraceCard {
-  stage: string;
-  summary: string;
-  metrics: string[];
-}
-
+/**
+ * 检索控制台 Trace 面板。
+ *
+ * @param props.trace 事件流
+ * @author lvdaxianerplus
+ */
 export function RetrievalTracePanel({ trace }: RetrievalTracePanelProps) {
-  const cards = buildTraceCards(trace);
   return (
+    // 简单壳：未来要加搜索/过滤就在这里挂
     <div className="trace-panel">
-      <h3>Trace</h3>
-      {cards.length > 0 ? (
-        <div className="trace-markdown-list">
-          {cards.map((item, index) => (
-            <article className="trace-markdown-card" key={`${item.stage}-${index}`}>
-              <h4>{item.stage}</h4>
-              <p>{item.summary}</p>
-              {item.metrics.length > 0 ? (
-                <ul>
-                  {item.metrics.map((metric) => <li key={metric}>{metric}</li>)}
-                </ul>
-              ) : null}
-            </article>
-          ))}
-        </div>
-      ) : <span className="muted-text">暂无 trace</span>}
+      <h3 className="text-sm font-semibold text-slate-900">Trace</h3>
+      <TraceTimeline events={trace} />
     </div>
   );
-}
-
-function buildTraceCards(trace: Array<Record<string, unknown>>): TraceCard[] {
-  return trace.flatMap((event) => {
-    const payload = event.payload as { trace?: unknown[]; duration_ms?: unknown; stage_durations_ms?: unknown } | undefined;
-    const nestedTrace = Array.isArray(payload?.trace) ? payload.trace : [];
-    const traceCards = nestedTrace.map((item) => normalizeTraceItem(item));
-    if (event.event === "answer.completed" && payload?.duration_ms !== undefined) {
-      traceCards.push({
-        stage: "answer.completed",
-        summary: "回答生成完成",
-        metrics: [
-          `duration_ms: ${payload.duration_ms}`,
-          ...formatStageDurations(payload.stage_durations_ms),
-        ],
-      });
-    }
-    return traceCards;
-  });
-}
-
-function normalizeTraceItem(item: unknown): TraceCard {
-  const trace = item as { stage?: unknown; summary?: unknown; metrics?: Record<string, unknown> };
-  return {
-    stage: String(trace.stage ?? "trace"),
-    summary: String(trace.summary ?? "已记录检索阶段"),
-    metrics: formatMetrics(trace.metrics ?? {}),
-  };
-}
-
-function formatMetrics(metrics: Record<string, unknown>): string[] {
-  return ["query_scope", "route_plan", "strategy", "result_count", "duration_ms"]
-    .filter((key) => metrics[key] !== undefined)
-    .map((key) => `${key}: ${formatMetricValue(metrics[key])}`);
-}
-
-function formatStageDurations(value: unknown): string[] {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return [];
-  }
-  return Object.entries(value as Record<string, unknown>).map(
-    ([key, duration]) => `${key}: ${formatMetricValue(duration)}`,
-  );
-}
-
-function formatMetricValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value.map(String).join(", ");
-  }
-  if (typeof value === "object" && value !== null) {
-    return Object.entries(value as Record<string, unknown>)
-      .slice(0, 3)
-      .map(([key, nestedValue]) => `${key}=${formatMetricValue(nestedValue)}`)
-      .join(", ");
-  }
-  return String(value);
 }

@@ -1,111 +1,195 @@
+/**
+ * Recall · 知识库列表页
+ *
+ * 视图编排：
+ * 1. 顶部：PageHeader + 3 个指标卡
+ * 2. 创建表单 SectionCard（名称 / 描述 / 提交）
+ * 3. 列表 SectionCard（KbListView：行 + 操作 + 错误条）
+ * 4. 弹层：KbSettingsSheet（分块设置） + DeleteConfirmDialog（删除确认）
+ * 5. 选中 KB 后切到 KnowledgeBaseDetailPage
+ *
+ * 子组件：KbListView / KbSettingsSheet / KnowledgeBaseDetailPage / DeleteConfirmDialog
+ *
+ * 设计要点：
+ * - 全部错误通过 setXxxError 暴露到 UI，catch 内静默但留下错误消息
+ * - handleSaveSettings / handlePublish / handleDelete 都用 finally 清理 loading id
+ * - 错误用 publishErrorId / deleteErrorId 标记"哪一行出错"，KbListView 渲染错误条
+ *
+ * @author lvdaxianerplus
+ */
 import { useState } from "react";
+import { RefreshCw } from "lucide-react";
 
-import { createKnowledgeBase, deleteKnowledgeBase, getKnowledgeBaseSettings, publishKnowledgeBase, updateKnowledgeBaseSettings } from "../../api/kb";
-import type { KnowledgeBase, KnowledgeBaseSettings } from "../../api/types";
+import { createKnowledgeBase, deleteKnowledgeBase, publishKnowledgeBase } from "../../api/kb";
+import type { KnowledgeBase } from "../../api/types";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ErrorState } from "../../components/common/ErrorState";
 import { LoadingState } from "../../components/common/LoadingState";
 import { SectionCard } from "../../components/common/SectionCard";
-import { StatusBadge } from "../../components/common/StatusBadge";
+import { MetricStrip } from "../../components/recall/MetricStrip";
+import { PageHeader } from "../../components/recall/PageHeader";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
 import { useKnowledgeBases } from "../../hooks/useKnowledgeBases";
+import {
+  DEFAULT_USER_ID,
+  KB_STATUS,
+} from "../chat/runtime/chatConstants";
+import { KbListView } from "./KbListView";
+import { KbSettingsSheet } from "./KbSettingsSheet";
 import { KnowledgeBaseDetailPage } from "./KnowledgeBaseDetailPage";
 
+/**
+ * 把任意 error 转成可展示字符串。
+ *
+ * @param error 异常对象
+ * @param fallback 兜底文案
+ * @author lvdaxianerplus
+ */
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallback;
+}
+
+/**
+ * 删除确认弹层。
+ *
+ * @author lvdaxianerplus
+ */
+interface DeleteConfirmDialogProps {
+  target: KnowledgeBase | null;
+  deleting: boolean;
+  onCancel: () => void;
+  onConfirm: (item: KnowledgeBase) => void;
+}
+function DeleteConfirmDialog({ target, deleting, onCancel, onConfirm }: DeleteConfirmDialogProps) {
+  if (!target) {
+    return null;
+  }
+  return (
+    <div
+      aria-label="删除知识库"
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-4"
+      role="dialog"
+    >
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl">
+        <h2 className="text-base font-semibold text-slate-900">删除知识库</h2>
+        <p className="mt-3 text-sm text-slate-600">
+          确认删除「<strong className="font-semibold text-slate-900">{target.name}</strong>」？
+          相关文档和 Chunk 会同步清理，且
+          <strong className="font-semibold text-red-700">不可恢复</strong>。
+        </p>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onCancel}>
+            取消
+          </Button>
+          <Button
+            aria-label={`确认删除 ${target.name}`}
+            disabled={deleting}
+            type="button"
+            variant="destructive"
+            onClick={() => onConfirm(target)}
+          >
+            {deleting ? "删除中" : "确认删除"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 知识库列表页：创建、发布、删除、设置分块。
+ *
+ * @author lvdaxianerplus
+ */
 export function KnowledgeBaseListPage() {
   const { items, isLoading, isError, status, refetch } = useKnowledgeBases();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [submitStatus, setSubmitStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [publishErrorId, setPublishErrorId] = useState<string | null>(null);
+  const [publishErrorMessage, setPublishErrorMessage] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteErrorId, setDeleteErrorId] = useState<string | null>(null);
+  const [deleteErrorMessage, setDeleteErrorMessage] = useState<string | null>(null);
   const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
   const [selectedKbId, setSelectedKbId] = useState<string | null>(null);
   const [settingsKb, setSettingsKb] = useState<KnowledgeBase | null>(null);
-  const [settings, setSettings] = useState<KnowledgeBaseSettings | null>(null);
-  const [settingsStatus, setSettingsStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
-  const [settingsSaveStatus, setSettingsSaveStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
-  const publishedCount = items.filter((item) => item.status === "published").length;
-  const pendingCount = items.filter((item) => !["published", "deleted", "archived"].includes(item.status)).length;
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeBase | null>(null);
+  const publishedCount = items.filter((item) => item.status === KB_STATUS.PUBLISHED).length;
+  const pendingCount = items.filter(
+    (item) => !(KB_STATUS.PUBLISHED === item.status || KB_STATUS.DELETED === item.status || KB_STATUS.ARCHIVED === item.status),
+  ).length;
+  const selectedKb = items.find((item) => item.id === selectedKbId) ?? null;
 
-  async function handleCreate() {
+  /**
+   * 创建知识库。失败时把错误信息写入 submitError 供 UI 展示。
+   *
+   * @author lvdaxianerplus
+   */
+  async function handleCreate(): Promise<void> {
     setSubmitStatus("loading");
+    setSubmitError(null);
     try {
-      await createKnowledgeBase({ name, description, owner_id: "default" });
+      await createKnowledgeBase({ name, description, owner_id: DEFAULT_USER_ID });
       setName("");
       setDescription("");
       setSubmitStatus("idle");
       await refetch();
-    } catch {
+    } catch (error) {
       setSubmitStatus("error");
+      setSubmitError(getErrorMessage(error, "创建失败，请稍后重试"));
     }
   }
 
-  async function handlePublish(kbId: string) {
+  /**
+   * 发布知识库。失败时记录目标 KB id 与错误信息。
+   *
+   * @author lvdaxianerplus
+   */
+  async function handlePublish(kbId: string): Promise<void> {
     setPublishingId(kbId);
     setPublishErrorId(null);
+    setPublishErrorMessage(null);
     try {
-      await publishKnowledgeBase(kbId, "default");
+      await publishKnowledgeBase(kbId, DEFAULT_USER_ID);
       await refetch();
-    } catch {
+    } catch (error) {
       setPublishErrorId(kbId);
+      setPublishErrorMessage(getErrorMessage(error, "发布失败，请稍后重试"));
     } finally {
       setPublishingId(null);
     }
   }
 
-  async function handleDelete(kbId: string) {
+  /**
+   * 删除知识库。成功时展示已清理的文档/Chunk 数量，失败时记录错误。
+   *
+   * @author lvdaxianerplus
+   */
+  async function handleDelete(kbId: string): Promise<void> {
     setDeletingId(kbId);
     setDeleteErrorId(null);
+    setDeleteErrorMessage(null);
     setDeleteMessage(null);
     try {
-      const deleted = await deleteKnowledgeBase(kbId, "default");
+      const deleted = await deleteKnowledgeBase(kbId, DEFAULT_USER_ID);
       setDeleteMessage(
         `删除完成，已清理 ${deleted.deleted_document_count ?? 0} 个文档 / ${deleted.deleted_chunk_count ?? 0} 个 Chunk`,
       );
       await refetch();
-    } catch {
+    } catch (error) {
       setDeleteErrorId(kbId);
+      setDeleteErrorMessage(getErrorMessage(error, "删除失败，请稍后重试"));
     } finally {
       setDeletingId(null);
     }
   }
-
-  async function handleOpenSettings(item: KnowledgeBase) {
-    setSettingsKb(item);
-    setSettings(null);
-    setSettingsStatus("loading");
-    setSettingsSaveStatus("idle");
-    try {
-      setSettings(await getKnowledgeBaseSettings(item.id));
-      setSettingsStatus("success");
-    } catch {
-      setSettingsStatus("error");
-    }
-  }
-
-  async function handleSaveSettings() {
-    if (!settingsKb || !settings) {
-      return;
-    }
-    setSettingsSaveStatus("loading");
-    try {
-      const updated = await updateKnowledgeBaseSettings(settingsKb.id, {
-        semantic_chunking_enabled: settings.semantic_chunking_enabled,
-        chunk_size: settings.chunk_size,
-        overlap: settings.overlap,
-        top_k_default: settings.top_k_default,
-        max_heading_depth: settings.max_heading_depth,
-        llm_planning_timeout_ms: settings.llm_planning_timeout_ms,
-      });
-      setSettings(updated);
-      setSettingsSaveStatus("success");
-    } catch {
-      setSettingsSaveStatus("error");
-    }
-  }
-
-  const selectedKb = items.find((item) => item.id === selectedKbId) ?? null;
 
   if (selectedKb) {
     return (
@@ -119,211 +203,84 @@ export function KnowledgeBaseListPage() {
   }
 
   return (
-    <div className="page-grid">
-      <section className="page-hero">
-        <div>
-          <span>Knowledge Assets</span>
-          <h2>知识资产概览</h2>
-          <p>管理知识库、发布状态、文档证据和可检索范围。</p>
-        </div>
-        <div className="summary-strip" aria-label="知识库概览">
-          <div>
-            <span>总量</span>
-            <strong>{items.length} 个知识库</strong>
-          </div>
-          <div>
-            <span>发布库</span>
-            <strong>{publishedCount} 个已发布</strong>
-          </div>
-          <div>
-            <span>待处理</span>
-            <strong>{pendingCount} 个待发版</strong>
-          </div>
-        </div>
-      </section>
-      <SectionCard title="知识库">
-        <div className="kb-command-bar">
-          <div className="form-inline">
-            <label className="form-field">
-              <span>知识库名称</span>
-              <input placeholder="例如：产品知识库" value={name} onChange={(event) => setName(event.target.value)} />
+    <div className="space-y-4">
+      <PageHeader
+        eyebrow="Knowledge Assets"
+        title="知识资产概览"
+        description="管理知识库、发布状态、文档证据和可检索范围。"
+      />
+      <MetricStrip
+        items={[
+          { label: "总量", value: `${items.length} 个知识库` },
+          { label: "发布库", value: `${publishedCount} 个已发布` },
+          { label: "待处理", value: `${pendingCount} 个待发版` },
+        ]}
+      />
+      <SectionCard>
+        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5">
+              <span className="text-sm font-medium text-slate-900">知识库名称</span>
+              <Input placeholder="例如：产品知识库" value={name} onChange={(event) => setName(event.target.value)} />
             </label>
-            <label className="form-field">
-              <span>描述</span>
-              <input placeholder="这批内容覆盖什么问题域" value={description} onChange={(event) => setDescription(event.target.value)} />
+            <label className="grid gap-1.5">
+              <span className="text-sm font-medium text-slate-900">描述</span>
+              <Input
+                placeholder="这批内容覆盖什么问题域"
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+              />
             </label>
           </div>
-          <div className="toolbar">
-            <button className="button" type="button" onClick={handleCreate} disabled={!name || submitStatus === "loading"}>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" onClick={handleCreate} disabled={!name || submitStatus === "loading"}>
               {submitStatus === "loading" ? "创建中" : "创建知识库"}
-            </button>
-            <button className="button button--secondary" type="button" onClick={refetch}>
+            </Button>
+            <Button type="button" variant="secondary" onClick={refetch}>
+              <RefreshCw aria-hidden="true" className="h-4 w-4" />
               刷新
-            </button>
+            </Button>
           </div>
         </div>
         {isLoading ? <LoadingState label="加载知识库中" /> : null}
         {isError ? <ErrorState title="加载失败" onRetry={refetch} /> : null}
-        {submitStatus === "error" ? <ErrorState title="创建失败" onRetry={handleCreate} /> : null}
-        {deleteMessage ? <div className="state-surface">{deleteMessage}</div> : null}
-        {status === "empty" ? <EmptyState title="暂无知识库" description="创建后即可上传 Markdown 文档。" /> : null}
-        {items.length > 0 ? (
-          <div className="kb-card-grid">
-            {items.map((item) => (
-              <article className="kb-card" key={item.id}>
-                <div className="kb-card__header">
-                  <strong>{item.name}</strong>
-                  <div className="kb-card__header-actions">
-                    <button
-                      aria-label={`设置 ${item.name}`}
-                      className="icon-button"
-                      type="button"
-                      onClick={() => handleOpenSettings(item)}
-                    >
-                      ⚙
-                    </button>
-                    <div className="kb-card__status">
-                      <span>发版状态</span>
-                      <StatusBadge status={item.status} />
-                    </div>
-                  </div>
-                </div>
-                <p>{item.description || "无描述"}</p>
-                <div className="kb-card__meta">
-                  <span>Chat scope: {item.status === "published" ? "enabled" : "pending publish"}</span>
-                </div>
-                <div className="kb-card__actions">
-                  <button
-                    aria-label={`查看文档 ${item.name}`}
-                    className="button button--secondary"
-                    type="button"
-                    onClick={() => setSelectedKbId(item.id)}
-                  >
-                    查看文档
-                  </button>
-                  {item.status !== "published" && item.status !== "deleted" && item.status !== "archived" ? (
-                    <button
-                      aria-label={`发布 ${item.name}`}
-                      className="button button--secondary"
-                      type="button"
-                      disabled={publishingId === item.id}
-                      onClick={() => handlePublish(item.id)}
-                    >
-                      {publishingId === item.id ? "发布中" : publishErrorId === item.id ? "重试发布" : "发布"}
-                    </button>
-                  ) : null}
-                  {item.status !== "deleted" && item.status !== "archived" ? (
-                    <button
-                      aria-label={`删除知识库 ${item.name}`}
-                      className="button button--danger"
-                      type="button"
-                      disabled={deletingId === item.id}
-                      onClick={() => handleDelete(item.id)}
-                    >
-                      {deletingId === item.id ? "删除中" : deleteErrorId === item.id ? "重试删除" : "删除"}
-                    </button>
-                  ) : null}
-                </div>
-              </article>
-            ))}
+        {submitStatus === "error" ? (
+          <ErrorState title="创建失败" description={submitError ?? undefined} onRetry={handleCreate} />
+        ) : null}
+        {deleteMessage ? (
+          <div className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            {deleteMessage}
           </div>
         ) : null}
       </SectionCard>
-      {settingsKb ? (
-        <aside
-          aria-label={`${settingsKb.name} 分块设置`}
-          aria-modal="true"
-          className="settings-dialog"
-          role="dialog"
-        >
-          <div className="settings-dialog__panel">
-            <div className="settings-dialog__header">
-              <div>
-                <span>知识库设置</span>
-                <strong>{settingsKb.name} 分块设置</strong>
-              </div>
-              <button className="icon-button" type="button" onClick={() => setSettingsKb(null)}>
-                关闭
-              </button>
-            </div>
-            {settingsStatus === "loading" ? <LoadingState label="加载分块设置中" /> : null}
-            {settingsStatus === "error" ? <ErrorState title="分块设置加载失败" onRetry={() => handleOpenSettings(settingsKb)} /> : null}
-            {settings ? (
-              <div className="kb-settings-panel">
-                <label className="check-row">
-                  <input
-                    aria-label="Semantic chunking"
-                    checked={settings.semantic_chunking_enabled}
-                    type="checkbox"
-                    onChange={(event) => setSettings({ ...settings, semantic_chunking_enabled: event.target.checked })}
-                  />
-                  <span>启用语义分块规划</span>
-                </label>
-                <label className="form-field">
-                  <span>Chunk size</span>
-                  <input
-                    aria-label="Chunk size"
-                    max={8000}
-                    min={200}
-                    type="number"
-                    value={settings.chunk_size}
-                    onChange={(event) => setSettings({ ...settings, chunk_size: Number(event.target.value) })}
-                  />
-                </label>
-                <label className="form-field">
-                  <span>Overlap</span>
-                  <input
-                    aria-label="Overlap"
-                    min={0}
-                    type="number"
-                    value={settings.overlap}
-                    onChange={(event) => setSettings({ ...settings, overlap: Number(event.target.value) })}
-                  />
-                </label>
-                <label className="form-field">
-                  <span>Default topK</span>
-                  <input
-                    aria-label="Default topK"
-                    max={50}
-                    min={1}
-                    type="number"
-                    value={settings.top_k_default}
-                    onChange={(event) => setSettings({ ...settings, top_k_default: Number(event.target.value) })}
-                  />
-                </label>
-                <label className="form-field">
-                  <span>Max heading depth</span>
-                  <select
-                    aria-label="Max heading depth"
-                    value={settings.max_heading_depth}
-                    onChange={(event) => setSettings({ ...settings, max_heading_depth: Number(event.target.value) })}
-                  >
-                    <option value={1}>1</option>
-                    <option value={2}>2</option>
-                    <option value={3}>3</option>
-                  </select>
-                </label>
-                <label className="form-field">
-                  <span>LLM planning timeout</span>
-                  <input
-                    aria-label="LLM planning timeout"
-                    max={30000}
-                    min={1000}
-                    type="number"
-                    value={settings.llm_planning_timeout_ms}
-                    onChange={(event) => setSettings({ ...settings, llm_planning_timeout_ms: Number(event.target.value) })}
-                  />
-                </label>
-                <button className="button" disabled={settingsSaveStatus === "loading"} type="button" onClick={handleSaveSettings}>
-                  {settingsSaveStatus === "loading" ? "保存中" : "保存分块设置"}
-                </button>
-                {settingsSaveStatus === "success" ? <EmptyState title="分块设置已保存" description="后续文档解析会使用新的知识库设置。" /> : null}
-                {settingsSaveStatus === "error" ? <ErrorState title="分块设置保存失败" onRetry={handleSaveSettings} /> : null}
-              </div>
-            ) : null}
-          </div>
-        </aside>
-      ) : null}
+      <SectionCard title="知识库" description={`共 ${items.length} 个`}>
+        {status === "empty" ? <EmptyState title="暂无知识库" description="创建后即可上传 Markdown 文档。" /> : null}
+        {items.length > 0 ? (
+          <KbListView
+            items={items}
+            publishingId={publishingId}
+            publishErrorId={publishErrorId}
+            publishErrorMessage={publishErrorMessage}
+            deletingId={deletingId}
+            deleteErrorId={deleteErrorId}
+            deleteErrorMessage={deleteErrorMessage}
+            onOpenDetail={setSelectedKbId}
+            onPublish={handlePublish}
+            onOpenSettings={setSettingsKb}
+            onDelete={setDeleteTarget}
+          />
+        ) : null}
+      </SectionCard>
+      <KbSettingsSheet settingsKb={settingsKb} onClose={() => setSettingsKb(null)} />
+      <DeleteConfirmDialog
+        deleting={deletingId === deleteTarget?.id}
+        target={deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={(item) => {
+          setDeleteTarget(null);
+          void handleDelete(item.id);
+        }}
+      />
     </div>
   );
 }
