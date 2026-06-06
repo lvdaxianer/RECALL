@@ -66,6 +66,7 @@ export function ChatAssistant() {
   const [topK, setTopK] = useState(5);
   const [temperature, setTemperature] = useState(0.2);
   const [useContext, setUseContext] = useState(false);
+  const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
   const {
@@ -77,6 +78,7 @@ export function ChatAssistant() {
     appendMessage,
     updateMessage,
     handleNewSession,
+    renameSession,
     sessionError,
   } = useChatSessions(isOpen);
 
@@ -87,6 +89,7 @@ export function ChatAssistant() {
     topK,
     temperature,
     useContext,
+    deepSearchEnabled,
     updateMessage,
     setStreamState,
   });
@@ -111,6 +114,7 @@ export function ChatAssistant() {
       top_k: topK,
       temperature,
       use_context: useContext,
+      deep_search_enabled: deepSearchEnabled,
       user_id: DEFAULT_USER_ID,
       session_id: activeSessionId,
     },
@@ -170,6 +174,7 @@ export function ChatAssistant() {
       topK,
       temperature,
       useContext,
+      deepSearchEnabled,
       userId: DEFAULT_USER_ID,
       sessionId: activeSessionId,
       onState: setStreamState,
@@ -197,6 +202,7 @@ export function ChatAssistant() {
     topK,
     temperature,
     useContext,
+    deepSearchEnabled,
     activeSession?.id,
     activeSession?.messages,
   ]);
@@ -241,6 +247,7 @@ export function ChatAssistant() {
           <ChatSessionList
             activeSessionId={activeSessionId}
             onCreateSession={() => void handleNewSession(publishedKbIds)}
+            onRenameSession={(sessionId, title) => void renameSession(sessionId, title)}
             onSelectSession={setActiveSessionId}
             publishedKbCount={publishedKbIds.length}
             sessions={sessions}
@@ -279,11 +286,13 @@ export function ChatAssistant() {
               draft={draft}
               isStreaming={streamState.status === "streaming"}
               onDraftChange={setDraft}
+              onDeepSearchEnabledChange={setDeepSearchEnabled}
               onSend={handleSendCallback}
               onTemperatureChange={setTemperature}
               onTopKChange={setTopK}
               onUseContextChange={setUseContext}
               selectedKbCount={selectedKbIds.length}
+              deepSearchEnabled={deepSearchEnabled}
               temperature={temperature}
               topK={topK}
               useContext={useContext}

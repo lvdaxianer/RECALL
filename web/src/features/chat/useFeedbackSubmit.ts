@@ -21,6 +21,7 @@ export interface UseFeedbackSubmitParams {
   topK: number;
   temperature: number;
   useContext: boolean;
+  deepSearchEnabled: boolean;
   updateMessage: (messageId: string, patch: Partial<ChatMessage>) => void;
   setStreamState: (state: Parameters<typeof streamAssistantAnswer>[0] extends never ? never : import("../../hooks/useRetrievalStream").StreamState) => void;
   /** 反馈落地完成时的副作用（用于清理 pendingFeedback 队列）。 */
@@ -50,7 +51,17 @@ export interface UseFeedbackSubmitResult {
  * @author lvdaxianerplus
  */
 export function useFeedbackSubmit(params: UseFeedbackSubmitParams): UseFeedbackSubmitResult {
-  const { messages, selectedKbIds, activeSessionId, topK, temperature, useContext, updateMessage, setStreamState } = params;
+  const {
+    messages,
+    selectedKbIds,
+    activeSessionId,
+    topK,
+    temperature,
+    useContext,
+    deepSearchEnabled,
+    updateMessage,
+    setStreamState,
+  } = params;
   const [pendingFeedback, setPendingFeedback] = useState<Record<string, "like" | "dislike">>({});
   // pendingFeedback 队列由 hook 自己持有；通过 setPendingFeedback 的 ref 让内部回调读到最新值。
   const pendingFeedbackRef = useRef(pendingFeedback);
@@ -100,6 +111,7 @@ export function useFeedbackSubmit(params: UseFeedbackSubmitParams): UseFeedbackS
             topK,
             temperature,
             useContext,
+            deepSearchEnabled,
             userId: DEFAULT_USER_ID,
             sessionId: activeSessionId,
             onState: setStreamState,
@@ -115,7 +127,17 @@ export function useFeedbackSubmit(params: UseFeedbackSubmitParams): UseFeedbackS
         updateMessage(messageId, { feedbackStatus: "error" });
       }
     },
-    [messages, selectedKbIds, activeSessionId, topK, temperature, useContext, updateMessage, setStreamState],
+    [
+      messages,
+      selectedKbIds,
+      activeSessionId,
+      topK,
+      temperature,
+      useContext,
+      deepSearchEnabled,
+      updateMessage,
+      setStreamState,
+    ],
   );
 
   /**

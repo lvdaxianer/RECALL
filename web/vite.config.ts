@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
@@ -7,7 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(fileURLToPath(new URL(".", import.meta.url)), "./src"),
     },
   },
   server: {
@@ -25,19 +26,19 @@ export default defineConfig({
       overlay: true,
       clientPort: 5173,
     },
-  },
-  // 优化热更新：排除不需要监控的目录
-  watch: {
-    ignored: [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/.git/**",
-      // 排除后端目录（避免 vite 误监控导致重载抖动）
-      "../app/**",
-      "../scripts/**",
-      "../tests/**",
-      "../data/**",
-    ],
+    // 优化热更新：排除不需要监控的目录
+    watch: {
+      ignored: [
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/.git/**",
+        // 排除后端目录（避免 vite 误监控导致重载抖动）
+        "../app/**",
+        "../scripts/**",
+        "../tests/**",
+        "../data/**",
+      ],
+    },
   },
   test: {
     environment: "jsdom",

@@ -63,6 +63,8 @@ export interface RetrievalStreamRequest {
   top_k?: number;
   /** 是否关联上下文 */
   use_context?: boolean;
+  /** 是否启用 DeepSearch 深度检索 */
+  deep_search_enabled?: boolean;
   /** 关联上下文的历史问题 */
   history_questions?: string[];
   /** 生成温度 */

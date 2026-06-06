@@ -5,6 +5,7 @@ import {
   listAgentEvents,
   listAgentRuns,
   listAgentSessions,
+  updateAgentSession,
   type AgentEvent,
   type AgentRun,
 } from "../../api/sessions";
@@ -86,6 +87,7 @@ export interface UseChatSessionsResult {
   loadSessions: () => Promise<void>;
   loadSessionRuns: (sessionId: string) => Promise<void>;
   handleNewSession: (publishedKbIds: string[]) => Promise<void>;
+  renameSession: (sessionId: string, title: string) => Promise<void>;
   sessionError: string | null;
 }
 
@@ -248,6 +250,30 @@ export function useChatSessions(isOpen: boolean): UseChatSessionsResult {
     }
   }, []);
 
+  /**
+   * 修改会话标题，优先保存后端，失败时暴露错误。
+   *
+   * @param sessionId 会话 id
+   * @param title 新标题
+   * @author lvdaxianerplus
+   */
+  const renameSession = useCallback(async (sessionId: string, title: string) => {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      return;
+    }
+    setSessionError(null);
+    try {
+      const remoteSession = await updateAgentSession(DEFAULT_USER_ID, sessionId, { title: nextTitle });
+      const next = fromAgentSession(remoteSession);
+      setSessions((current) =>
+        current.map((session) => (session.id === sessionId ? { ...session, title: next.title } : session)),
+      );
+    } catch (error) {
+      setSessionError(getErrorMessage(error, "修改会话名称失败"));
+    }
+  }, []);
+
   return {
     sessions,
     activeSessionId,
@@ -259,6 +285,7 @@ export function useChatSessions(isOpen: boolean): UseChatSessionsResult {
     loadSessions,
     loadSessionRuns,
     handleNewSession,
+    renameSession,
     sessionError,
   };
 }

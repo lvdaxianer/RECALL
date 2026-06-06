@@ -130,3 +130,29 @@ export async function createAgentSession(
   });
   return response.data;
 }
+
+/**
+ * 更新会话标题。
+ *
+ * @param userId 用户 id
+ * @param sessionId 会话 id
+ * @param payload 更新字段
+ * @returns 更新后的会话
+ * @author lvdaxianerplus
+ * @date 2026-06-06
+ */
+export async function updateAgentSession(
+  userId: string,
+  sessionId: string,
+  payload: { title: string },
+): Promise<AgentSession> {
+  const response = await requestJson<ApiResponse<AgentSession>>(
+    `/api/v1/agent/${userId}/sessions/${sessionId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return response.data;
+}

@@ -33,6 +33,8 @@ export interface ChatComposerProps {
   temperature: number;
   /** 是否关联上下文 */
   useContext: boolean;
+  /** 是否启用 DeepSearch 深度检索 */
+  deepSearchEnabled: boolean;
   /** 是否可发送（业务态：KB 选好 + 草稿非空 + 不在 streaming） */
   canSend: boolean;
   /** 是否在流式生成中 */
@@ -43,6 +45,7 @@ export interface ChatComposerProps {
   onTopKChange: (value: number) => void;
   onTemperatureChange: (value: number) => void;
   onUseContextChange: (value: boolean) => void;
+  onDeepSearchEnabledChange: (value: boolean) => void;
   onSend: () => void;
 }
 
@@ -70,6 +73,7 @@ export function ChatComposer({
   topK,
   temperature,
   useContext,
+  deepSearchEnabled,
   canSend,
   isStreaming,
   selectedKbCount,
@@ -77,6 +81,7 @@ export function ChatComposer({
   onTopKChange,
   onTemperatureChange,
   onUseContextChange,
+  onDeepSearchEnabledChange,
   onSend,
 }: ChatComposerProps) {
   return (
@@ -132,6 +137,19 @@ export function ChatComposer({
           />
           <span>关联上下文</span>
         </label>
+        <label className="flex items-center gap-1.5 rounded-md px-1.5 text-xs text-slate-700 transition-colors hover:bg-slate-50">
+          <Checkbox
+            aria-label="DeepSearch 深度检索"
+            checked={deepSearchEnabled}
+            onCheckedChange={(checked) => onDeepSearchEnabledChange(checked === true)}
+          />
+          <span>DeepSearch 深度检索</span>
+        </label>
+        {deepSearchEnabled ? (
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
+            会拆分问题并多轮检索，耗时会更长
+          </span>
+        ) : null}
         {/* 已选 KB 数（只读展示） */}
         <span className="ml-auto font-mono text-[11px] text-slate-400">
           已选 {selectedKbCount} 个已发布 KB

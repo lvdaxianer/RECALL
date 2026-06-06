@@ -344,7 +344,7 @@ describe("app shell and chat assistant", () => {
 
     expect(await within(dialog).findByText("ES 如何配置过滤字段？")).toBeInTheDocument();
     await waitFor(() => expect(within(dialog).getAllByText(/可以这样配置/).length).toBeGreaterThan(0));
-    expect(await within(dialog).findByText(/耗时/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/总耗时/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "查看证据与 Trace" }));
     // v1.3: 证据面板内联在右栏，不开新 dialog
     expect(await within(dialog).findByText("证据 & Trace")).toBeInTheDocument();
@@ -592,6 +592,45 @@ describe("app shell and chat assistant", () => {
       expect.objectContaining({ method: "POST" }),
     ));
     expect(await within(dialog).findByRole("button", { name: /新的检索会话/ })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("renames the active chat session from the sidebar", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/v1/kb") {
+        return new Response(JSON.stringify({ data: [] }));
+      }
+      if (url === "/api/v1/agent/default/sessions/sess-api" && init?.method === "PATCH") {
+        return new Response(JSON.stringify({ data: makeSession("sess-api", "小程序白屏排查") }));
+      }
+      if (url === "/api/v1/agent/default/sessions") {
+        return new Response(JSON.stringify({ data: [makeSession("sess-api", "新的检索会话")] }));
+      }
+      if (url === "/api/v1/agent/default/sessions/sess-api/runs") {
+        return new Response(JSON.stringify({ data: [] }));
+      }
+      return new Response(JSON.stringify({ data: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "打开 Recall 助手" }));
+    const dialog = screen.getByRole("dialog", { name: "Recall 助手" });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === "/api/v1/agent/default/sessions")).toBe(true));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === "/api/v1/agent/default/sessions/sess-api/runs")).toBe(true));
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "修改会话名称" }));
+    fireEvent.change(within(dialog).getByLabelText("会话名称"), { target: { value: "小程序白屏排查" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存会话名称" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agent/default/sessions/sess-api",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ title: "小程序白屏排查" }),
+      }),
+    ));
+    expect(await within(dialog).findByText("小程序白屏排查")).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 
@@ -864,6 +903,58 @@ describe("app shell and chat assistant", () => {
     expect(secondPayload.temperature).toBe(0.7);
     expect(secondPayload.use_context).toBe(true);
     expect(secondPayload.history_questions).toEqual(["第一问"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("enables DeepSearch and shows visible decomposition steps", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/v1/kb") {
+        return new Response(JSON.stringify({
+          data: [
+            {
+              id: "kb-published",
+              name: "已发布知识库",
+              description: "可用于聊天",
+              owner_id: "u1",
+              status: "published",
+            },
+          ],
+        }));
+      }
+      if (url === "/api/v1/retrieval/search/stream" && init?.method === "POST") {
+        return new Response(
+          'event: request.created\ndata: {"request_id":"req-deep","payload":{"input":"小程序上线后白屏","summary":"收到问题"}}\n\n' +
+            'event: retrieval.progress\ndata: {"request_id":"req-deep","payload":{"stage":"deep_search_planning","summary":"深度检索会拆分问题并多轮检索，可能需要更久"}}\n\n' +
+            'event: deep_search.plan\ndata: {"request_id":"req-deep","payload":{"intent":"排查小程序上线后白屏","cot_plan":["识别故障现象","拆分检索方向"],"sub_questions":["是否是构建或发布配置导致白屏？"]}}\n\n' +
+            'event: deep_search.step\ndata: {"request_id":"req-deep","payload":{"index":1,"sub_question":"是否是构建或发布配置导致白屏？","hit_count":1,"top_hits":[{"chunk_id":"chunk-build","title":"发布配置","score":0.91}]}}\n\n' +
+            'event: answer.delta\ndata: {"request_id":"req-deep","payload":{"text":"检查发布配置。","chunk_id":"chunk-build"}}\n\n' +
+            'event: answer.completed\ndata: {"request_id":"req-deep","payload":{"results":[{"chunk_id":"chunk-build","document_name":"release.md","title":"发布配置","content":"检查发布配置","score":0.91}]}}\n\n',
+        );
+      }
+      return new Response(JSON.stringify({ data: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "打开 Recall 助手" }));
+    const dialog = screen.getByRole("dialog", { name: "Recall 助手" });
+
+    const deepSearchCheckbox = await within(dialog).findByLabelText("DeepSearch 深度检索");
+    expect(deepSearchCheckbox).not.toBeChecked();
+    fireEvent.click(deepSearchCheckbox);
+    expect(within(dialog).getByText("会拆分问题并多轮检索，耗时会更长")).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("输入问题"), { target: { value: "小程序上线后白屏" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "发送" }));
+
+    expect(await within(dialog).findByText("深度检索会拆分问题并多轮检索，可能需要更久")).toBeInTheDocument();
+    expect(await within(dialog).findByText("DeepSearch：排查小程序上线后白屏")).toBeInTheDocument();
+    expect(await within(dialog).findByText("子问题 1：是否是构建或发布配置导致白屏？")).toBeInTheDocument();
+    expect(await within(dialog).findByText("命中 1 条资料")).toBeInTheDocument();
+    expect(await within(dialog).findByText("最高相关：发布配置")).toBeInTheDocument();
+
+    const streamCall = fetchMock.mock.calls.find(([url]) => url === "/api/v1/retrieval/search/stream");
+    const payload = JSON.parse(String(streamCall?.[1]?.body));
+    expect(payload.deep_search_enabled).toBe(true);
     vi.unstubAllGlobals();
   });
 });

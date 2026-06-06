@@ -48,6 +48,7 @@ export interface StreamAssistantParams {
   topK: number;
   temperature: number;
   useContext: boolean;
+  deepSearchEnabled: boolean;
   userId: string;
   sessionId: string;
   /** 收到每条流事件时回调（用于更新 stream state / 消息内容）。 */
@@ -82,6 +83,7 @@ export async function streamAssistantAnswer(params: StreamAssistantParams): Prom
     topK,
     temperature,
     useContext,
+    deepSearchEnabled,
     userId,
     sessionId,
     onProgress,
@@ -106,6 +108,7 @@ export async function streamAssistantAnswer(params: StreamAssistantParams): Prom
         top_k: topK,
         temperature,
         use_context: useContext,
+        deep_search_enabled: deepSearchEnabled,
         // 仅在 useContext 为 true 时才传历史问题（避免无谓的请求体膨胀）
         history_questions: useContext ? historyQuestions : undefined,
         user_id: userId,
