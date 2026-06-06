@@ -114,6 +114,8 @@ start_backend() {
 start_frontend() {
   stop_pid "frontend" "$FRONTEND_PID_FILE"
   log "启动前端 Vite :$PORT_FRONTEND → $FRONTEND_LOG"
+  # 清掉陈旧的 deps 缓存（避免新增文件解析不到）
+  rm -rf "$ROOT_DIR/web/node_modules/.vite/deps"
   local pkg_cmd="npm"
   command -v pnpm >/dev/null 2>&1 && pkg_cmd="pnpm"
   (
