@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- 支持深度检索与会话改名 (c11fbea)
+
+- 增加主题推荐与深度检索能力 (f2a5127)
+
+### Changed
+- 拆分聊天消息展示组件 (950fdbb)
+
+- 统一聊天耗时与推荐展示 (e8fbd55)
+
+### Changed
+- 忽略本地 worktree 目录 (57f00dc)
+
+- 启动前端前清掉陈旧 vite deps 缓存 (795a0f4)
+
+### Changed
+- 优化前后端热更新（避免无效重载） (00087c1)
+
+- 新增 start.sh 一键启动脚本 + start.md 文档 (9e34fc8)
+
+### Changed
 - 更新 CHANGELOG 记录 code-review-spec 全套整改 (459a086)
 
 - code-review-spec 全套整改（拆分+注释+模式修复） (fbd859f)
